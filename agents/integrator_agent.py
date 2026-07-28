@@ -1,11 +1,22 @@
-from aos_v0.models import Plan
+from graph_utils import get_sink_nodes
+from models import Graph
 
 
 class IntegratorAgent:
-    def integrate(self, plan: Plan) -> str:
-        print("[integrator-agent] combining outputs from all sub-agents")
-        # sequential case: last subtask's output IS the final result,
-        # because each subtask already consumed the previous one's output.
-        final = plan.subtasks[-1].output
+    def integrate(self, graph: Graph) -> str:
+        sinks = get_sink_nodes(graph)
+        print(f"[integrator-agent] combining outputs from {len(sinks)} sink node(s)")
+
+        if len(sinks) == 1:
+            result = sinks[0].output
+        else:
+            parts = []
+            for node in sinks:
+                parts.append(
+                    f"From node '{node.id}' ({node.description}):\n"
+                    f"{node.output}"
+                )
+            result = "\n\n".join(parts)
+
         print("[integrator-agent] done")
-        return final
+        return result
