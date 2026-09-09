@@ -1,3 +1,17 @@
+Metadata-Version: 2.4
+Name: aos-v0
+Version: 0.0.5
+Summary: A capability-routed, auditable agent execution kernel
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pydantic<3.0,>=2.0
+Requires-Dist: requests<3.0,>=2.31.0
+Requires-Dist: python-dotenv<2.0,>=1.0.0
+Requires-Dist: groq>=0.13.0
+Requires-Dist: openai>=1.0.0
+Requires-Dist: ddgs>=9.0.0
+Requires-Dist: huggingface_hub[inference]>=0.35.0
+
 # AOS v0.1.0 — Adaptive Cognitive AI Microkernel
 
 AOS (Adaptive Cognitive System) is a lightweight agentic framework that decomposes user prompts into task graphs — directed acyclic graphs (DAGs) of capability-routed nodes — and executes them concurrently in dependency-respecting waves.

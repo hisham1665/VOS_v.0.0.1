@@ -1,1 +1,13 @@
 /.env
+
+# Local Python caches
+__pycache__/
+*.py[cod]
+
+# Generated runtime artifacts
+/data/outputs/*
+!/data/outputs/.gitkeep
+
+# Local recovery/temp folders
+/.restore/
+/.restore.zip

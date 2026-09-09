@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aos-v0"
+version = "0.0.5"
+description = "A capability-routed, auditable agent execution kernel"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0,<3.0",
+    "requests>=2.31.0,<3.0",
+    "python-dotenv>=1.0.0,<2.0",
+    "groq>=0.13.0",
+    "openai>=1.0.0",
+    "ddgs>=9.0.0",
+    "huggingface_hub[inference]>=0.35.0",
+]
+
+[project.scripts]
+aos = "aos_v0.cli:main"
+aos-registry-export = "aos_v0.services.registry_export:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"

@@ -1,0 +1,7 @@
+pydantic<3.0,>=2.0
+requests<3.0,>=2.31.0
+python-dotenv<2.0,>=1.0.0
+groq>=0.13.0
+openai>=1.0.0
+ddgs>=9.0.0
+huggingface_hub[inference]>=0.35.0
