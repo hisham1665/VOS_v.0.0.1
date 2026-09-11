@@ -91,13 +91,85 @@ def missing_flags(dna: CapabilityDNA, provided: List[str]) -> List[str]:
     return [f for f in dna.flags if f not in have]
 
 
+# Input-modality capability flags (from the CAPABILITY_FLAGS vocabulary in
+# models.py). A node carrying any of these selects for a non-text input, and a
+# resource serving it must accept that modality or the call would feed e.g. an
+# image file path to a text-only LLM.
+_IMAGE_MODALITY_FLAGS = {
+    "image_classification",
+    "zero_shot_classification",
+    "image_text_matching",
+    "image_text_retrieval",
+    "visual_feature_extraction",
+    "object_detection",
+    "object_identification",
+    "object_localization",
+    "multi_object_detection",
+    "image_understanding",
+    "visual_question_answering",
+    "visual_reasoning",
+    "vision_language",
+    "image_representation",
+    "visual_embedding",
+    "image_similarity",
+    "vision_input",
+    "vision.understanding",
+}
+
+_AUDIO_MODALITY_FLAGS = {
+    "audio_input",
+    "speech_recognition",
+    "automatic_speech_recognition",
+    "speech_to_text",
+    "transcription",
+    "multilingual_speech",
+    "audio_understanding",
+    "speech_understanding",
+    "audio_analysis",
+    "audio_to_text",
+    "audio_classification",
+    "sound_classification",
+    "audio_event_recognition",
+}
+
+_DOCUMENT_MODALITY_FLAGS = {
+    "document.extraction",
+}
+
+# Coarse capability strings (exact-match fallback) that imply a media input.
+_IMAGE_CAPABILITIES = {"vision"}
+_AUDIO_CAPABILITIES = {"speech_transcription", "audio"}
+_DOCUMENT_CAPABILITIES = {"document_extraction", "document"}
+
+
+def required_input_modality(
+    dna_flags: List[str], capability: str = ""
+) -> Optional[str]:
+    """The input modality (image/audio/document) a node must be served with, else None.
+
+    Derived from the node's DNA flags (the authoritative signal) with a fallback
+    to the coarse capability string for the no-DNA exact-match path. Returns
+    None when the node is text-only.
+    """
+    flags = set(dna_flags)
+    cap = capability.lower()
+
+    if flags & _IMAGE_MODALITY_FLAGS or cap in _IMAGE_CAPABILITIES:
+        return "image"
+    if flags & _AUDIO_MODALITY_FLAGS or cap in _AUDIO_CAPABILITIES:
+        return "audio"
+    if flags & _DOCUMENT_MODALITY_FLAGS or cap in _DOCUMENT_CAPABILITIES:
+        return "document"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # CapabilityManifest (DOC1 5.1)
 # ---------------------------------------------------------------------------
 
 
 class IOSchema(BaseModel):
-    type: Literal["text", "image", "audio", "structured"] = "text"
+    type: Literal["text", "image", "audio", "document", "structured"] = "text"
     format: str = "plain"
 
 
@@ -383,6 +455,30 @@ class CapabilityRegistry:
         """Sorted ids of executable resources."""
         return sorted(m.resource_id for m in self.routable_manifests())
 
+    @staticmethod
+    def accepts_input(manifest: CapabilityManifest, modality: Optional[str]) -> bool:
+        """Whether a resource's input schema accepts the required modality.
+
+        `modality` is the node's required input type. None (text node) is
+        compatible with any resource whose schema accepts text OR no media
+        modality -- a text LLM serves a text node. A media modality (image /
+        audio) is only compatible with a resource whose input schema matches it
+        exactly, so we never feed an image file path to a text-only LLM.
+        """
+        if modality is None:
+            return True
+        return manifest.input_schema.type == modality
+
+    def routable_for_modality(
+        self, modality: Optional[str]
+    ) -> List[CapabilityManifest]:
+        """All routable resources that can accept the node's required modality."""
+        return [
+            m
+            for m in self.routable_manifests()
+            if self.accepts_input(m, modality)
+        ]
+
     # -- M1: plain lookups --------------------------------------------------
 
     def find(self, flags: List[str]) -> List[str]:
@@ -589,15 +685,24 @@ class CapabilityRegistry:
 
     # -- scheduling: select + bind ------------------------------------------
 
-    def select(self, dna: CapabilityDNA) -> SelectionResult:
+    def select(
+        self, dna: CapabilityDNA, required_modality: Optional[str] = None
+    ) -> SelectionResult:
         """Score every available resource against the DNA and return the winner.
 
-        Availability (status="up") is the only hard gate: a resource that is
-        down simply cannot serve the task. All other capability gaps are
-        expressed as rejection-rate contributions to the score.
+        Hard gates, applied before scoring:
+          • routability   — declared-only stubs (transport=declared) excluded.
+          • availability  — status != "up" excluded.
+          • input modality — when `required_modality` is a media type (image /
+            audio), any resource whose input schema does not accept that type is
+            excluded. This is the guard that stops an image node from silently
+            binding to a text LLM that would "summarise" the file path.
 
-        Raises InfeasibleDNAError only when the registry is empty or every
-        registered resource is unavailable.
+        All other capability gaps are expressed as rejection-rate contributions.
+
+        Raises InfeasibleDNAError when the registry is empty, every resource is
+        unavailable/unroutable, or (for a media node) no modality-compatible
+        resource is available.
         """
         if not self._manifests:
             raise InfeasibleDNAError(dna, {})
@@ -610,6 +715,11 @@ class CapabilityRegistry:
         for rid, manifest in self._manifests.items():
             if not self.is_routable(manifest):
                 unavailable[rid] = "declared-only interface (not wired to pipeline)"
+            elif not self.accepts_input(manifest, required_modality):
+                unavailable[rid] = (
+                    f"input schema '{manifest.input_schema.type}' does not accept "
+                    f"required modality '{required_modality}'"
+                )
             elif manifest.availability.status == "up":
                 available.append(manifest)
             else:
@@ -638,9 +748,11 @@ class CapabilityRegistry:
             all_scores=scores,
         )
 
-    def bind(self, dna: CapabilityDNA) -> Tuple[SelectionResult, Callable]:
+    def bind(
+        self, dna: CapabilityDNA, required_modality: Optional[str] = None
+    ) -> Tuple[SelectionResult, Callable]:
         """select() plus the callable, which is what the executor actually needs."""
-        decision = self.select(dna)
+        decision = self.select(dna, required_modality=required_modality)
         return decision, self._run_fns[decision.resource_id]
 
     # -- legacy M5 methods kept for compatibility ---------------------------

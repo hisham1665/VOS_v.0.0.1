@@ -50,7 +50,7 @@ def build_default_registry() -> CapabilityRegistry:
     summarizer, a tight-budget one picks this, and a compare/analyse node
     requiring reasoning.deep cannot pick it at all.
     """
-    from aos_v0.capabilities import summarization, synthesis, vision, web_search
+    from aos_v0.capabilities import document, summarization, synthesis, vision, web_search
 
     manifests = [
         # Retrieval tool: DDG search plus an LLM pass that pulls exact facts out
@@ -132,6 +132,33 @@ def build_default_registry() -> CapabilityRegistry:
                 "model": "medgemma1.5:latest",
             },
         ),
+        # Local PDF/document text extraction via pdfplumber. Free per call.
+        # It is the only provider of document.extraction, so any node flagged
+        # for it binds here regardless of the scoring details.
+        CapabilityManifest(
+            resource_id="document_extraction",
+            resource_class="tool",
+            capabilities=[
+                "document.extraction",
+                "text.summarization",
+                "reasoning.shallow",
+            ],
+            input_schema=IOSchema(type="document", format="path"),
+            output_schema=IOSchema(type="text", format="plain"),
+            cost_model=CostModel(unit="per_call", estimate_usd=0.0),
+            latency_model=LatencyModel(p50_ms=300, p95_ms=2000),
+            quality_priors={
+                "document.extraction": 0.95,
+                "text.summarization": 0.55,
+                "reasoning.shallow": 0.50,
+            },
+            availability=Availability(status="up", rate_limit_rpm=120),
+            risk_class="low",
+            metadata={
+                "provider": "local",
+                "model": "pdfplumber",
+            },
+        ),
         # Final-answer writer. Shares the model with `summarization` but not the
         # instruction: it expands rather than compresses, so its priors on
         # reasoning.deep beat the summarizer's and it is the natural winner for
@@ -204,6 +231,7 @@ def build_default_registry() -> CapabilityRegistry:
         "web_search": web_search.run,
         "summarization": summarization.run,
         "vision": vision.run,
+        "document_extraction": document.run,
         "synthesis": synthesis.run,
         "quick_summarization": quick_summarization_run,
     }

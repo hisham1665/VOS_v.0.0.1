@@ -6,7 +6,7 @@ CapabilityManifest (DOC1 5.1) which lives in capability_registry.py.
 """
 
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -45,6 +45,11 @@ CAPABILITY_FLAGS = [
     # scores identically to a summarize node and binds to the summarizer.
     "answer.synthesis",
     "domain.specific",
+    # Reading text content out of PDF / document files so the workflow can
+    # consume uploaded documents instead of passing a useless file path to a
+    # text-only LLM. Distinct from text.summarization: this is extraction, not
+    # compression, and it explicitly selects for a document-typed input.
+    "document.extraction",
     # Multimodal / specialized-model capabilities (audio + vision granularity).
     # Added for the multimodal-catalog expansion. `audio_input` / `vision_input`
     # are input-modality flags so "every audio-capable resource" is a first-class
@@ -208,9 +213,19 @@ class Artifact(BaseModel):
     """
 
     id: str
-    modality: Literal["audio", "image", "text"]
+    # `modality` is retained for the graph executor.  It is intentionally not
+    # restricted to its original three values: the artifact boundary also
+    # represents documents, datasets, archives and videos before a graph has a
+    # capability that can consume them.
+    modality: str
+    name: Optional[str] = None
+    artifact_type: str = "unknown"
+    mime_type: Optional[str] = None
+    size: int = 0
     path: Optional[str] = None
     source: str = "user_input"  # "user_input" | "node:<id>"
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    lifecycle: str = "active"
 
 
 class ArtifactModalityMismatch(RuntimeError):

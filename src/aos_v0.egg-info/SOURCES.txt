@@ -4,6 +4,9 @@ src/aos_v0/__init__.py
 src/aos_v0/__main__.py
 src/aos_v0/cli.py
 src/aos_v0/config.py
+src/aos_v0/interactive.py
+src/aos_v0/tui.py
+src/aos_v0/tui_commands.py
 src/aos_v0.egg-info/PKG-INFO
 src/aos_v0.egg-info/SOURCES.txt
 src/aos_v0.egg-info/dependency_links.txt
@@ -21,13 +24,16 @@ src/aos_v0/capabilities/synthesis.py
 src/aos_v0/capabilities/vision.py
 src/aos_v0/capabilities/web_search.py
 src/aos_v0/core/__init__.py
+src/aos_v0/core/artifacts.py
 src/aos_v0/core/capability_registry.py
 src/aos_v0/core/constraint_policy.py
 src/aos_v0/core/diagram_utils.py
 src/aos_v0/core/dna_extractor.py
+src/aos_v0/core/events.py
 src/aos_v0/core/failure_manager.py
 src/aos_v0/core/graph_utils.py
 src/aos_v0/core/models.py
+src/aos_v0/core/runtime.py
 src/aos_v0/providers/__init__.py
 src/aos_v0/providers/errors.py
 src/aos_v0/providers/hf.py
@@ -35,3 +41,6 @@ src/aos_v0/services/__init__.py
 src/aos_v0/services/evaluation.py
 src/aos_v0/services/registry_export.py
 src/aos_v0/services/resource_registration.py
+tests/test_artifacts.py
+tests/test_event_integration.py
+tests/test_interactive.py

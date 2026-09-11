@@ -1,3 +1,4 @@
 [console_scripts]
 aos = aos_v0.cli:main
 aos-registry-export = aos_v0.services.registry_export:main
+aos-tui = aos_v0.tui:main

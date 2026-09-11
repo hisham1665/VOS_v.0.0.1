@@ -733,6 +733,38 @@ The generated execution plan is written to:
 data/outputs/plan.md
 ```
 
+## Interactive TUI and artifacts
+
+Install the optional terminal UI dependencies, then start the event-driven
+interactive client:
+
+```bash
+python -m pip install -e ".[tui]"
+aos-tui
+```
+
+The primary interaction is natural language. Upload files before a request:
+
+```text
+AOS › /upload research.pdf diagram.png recording.wav
+AOS › Analyze the paper and explain the diagram.
+```
+
+`ArtifactManager` stores uploads in `data/artifacts/` and standardizes each as
+an `Artifact` with an ID, category, MIME type, size, path and metadata. The
+interactive service creates a `RequestContext` containing selected artifact
+references and passes it into the unchanged planning/DNA/routing/execution
+kernel. The Textual UI only renders `OrchestrationEvent` messages emitted by
+that kernel; it never makes routing decisions.
+
+Commands: `/help`, `/clear`, `/history`, `/session`, `/status`, `/agents`,
+`/capabilities`, `/files`, `/upload`, `/config`, and `/quit`.
+
+Current kernel support for direct media execution remains image and audio,
+matching the registered capabilities. Documents, datasets, archives and video
+are accepted and retained as standardized context, but require a corresponding
+registered parsing capability before AOS can process their binary contents.
+
 ## Configuration
 
 The v0.1.0 architecture introduces configuration points for capability selection in addition to the existing execution settings.

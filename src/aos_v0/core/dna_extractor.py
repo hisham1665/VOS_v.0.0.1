@@ -62,6 +62,7 @@ be condensed)
    - writing the final answer to the user's whole job -> \
 ["reasoning.deep", "text.summarization"]
    - describing an image -> ["vision.understanding"]
+   - extracting text from a PDF / document file -> ["document.extraction"]
    - transcribing speech/audio to text -> ["speech.transcription"]
    - converting a recording to text -> ["speech.transcription"]
    - identifying what type of sound or audio event -> ["audio_event_recognition"]
@@ -123,6 +124,11 @@ _EXTRACT_TOOL = {
 # broad "audio" catch-all.
 _HEURISTIC_KEYWORDS: list[tuple[tuple[str, ...], str]] = [
     (("image", "photo", "picture", "visual", "diagram"), "vision.understanding"),
+    # Document / PDF extraction: reading text out of an uploaded file. Must come
+    # before the broad "text.summarization"/"web.search" heuristics so
+    # "extract content from the pdf" does not collapse into summarization.
+    (("pdf", "document", "from the file", "from this file", "extract text",
+      "read the file", "file content"), "document.extraction"),
     # Transcription: explicit speech-to-text intent. Must come BEFORE the broad
     # "audio" catch-all so "transcribe this audio" maps to speech.transcription,
     # not audio_classification.
@@ -167,6 +173,7 @@ _CAPABILITY_TO_FLAG = {
     "synthesis": "reasoning.deep",
     "speech_transcription": "speech.transcription",
     "audio": "audio_input",
+    "document_extraction": "document.extraction",
 }
 
 

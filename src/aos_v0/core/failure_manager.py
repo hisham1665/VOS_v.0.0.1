@@ -23,7 +23,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
-from aos_v0.core.capability_registry import CapabilityRegistry
+from aos_v0.core.capability_registry import CapabilityRegistry, required_input_modality
 from aos_v0.core.models import Node
 
 
@@ -90,6 +90,22 @@ _CORRUPT_PATTERNS = [
 _REFUSAL_PATTERNS = [
     re.compile(r"\bI (?:cannot|can't|am unable to) (?:assist|help|provide)\b", re.IGNORECASE),
     re.compile(r"\bas an AI language model\b", re.IGNORECASE),
+]
+
+# Media node denial patterns. A node that REQUIRES an image/audio input but
+# receives generic output claiming it cannot access/view the media was almost
+# certainly served by the wrong resource (e.g. a text LLM handed a file path).
+# Detecting this turns a silent false-success ("RECOVERED on quick_summarization")
+# into a proper tool.output_corrupt classification so the ladder does not stop.
+_MEDIA_DENIAL_PATTERNS = [
+    re.compile(r"\bcannot .*?(?:visually )?analy[sz]e images?\b", re.IGNORECASE),
+    re.compile(r"\b(?:don't|do not|can't|cannot|unable to) (?:have the )?(?:capabilit|access|see|view).*?image\b", re.IGNORECASE),
+    re.compile(r"\bno (?:image|visual content|image content)\b", re.IGNORECASE),
+    re.compile(r"\bcannot? (?:access|view|read|process) (?:the )?(?:image|audio|file)\b", re.IGNORECASE),
+    re.compile(r"\bunable to visually analyze\b", re.IGNORECASE),
+    re.compile(r"\b(image|audio) (?:file path|path only|lacks?|content is missing)\b", re.IGNORECASE),
+    re.compile(r"\bwithout (?:the |a )?(?:actual )?image\b", re.IGNORECASE),
+    re.compile(r"\bif the image (?:showed|provided)\b", re.IGNORECASE),
 ]
 
 
@@ -161,6 +177,23 @@ class FailureManager:
         if output is None or not output.strip():
             return [Detection(CLASS_TOOL_EMPTY_RESULT, "empty output")]
 
+        # A media node whose output denies access to the media was served by the
+        # wrong (text-only) resource. Flag it as corrupt output so the recovery
+        # ladder does not treat generic text as a successful recovery.
+        modality = required_input_modality(
+            node.dna.flags if node.dna else [], node.capability
+        )
+        if modality is not None:
+            for pattern in _MEDIA_DENIAL_PATTERNS:
+                if pattern.search(output):
+                    return [
+                        Detection(
+                            CLASS_TOOL_OUTPUT_CORRUPT,
+                            f"media node served generic output (matched "
+                            f"{pattern.pattern!r})",
+                        )
+                    ]
+
         for pattern in _CORRUPT_PATTERNS:
             if pattern.search(output):
                 detections.append(
@@ -230,6 +263,8 @@ class FailureManager:
         primary_resource_id: str,
         candidate_ids: List[str],
         log: Callable[[str], None] = print,
+        event_sink=None,
+        request_id: str = "",
     ) -> str:
         """Run the node under the closed loop and return its final output.
 
@@ -269,6 +304,10 @@ class FailureManager:
             f"[failure-manager] node '{node.id}': detected {failure_class} "
             f"({symptom})"
         )
+        if event_sink:
+            from aos_v0.core.events import EventType, OrchestrationEvent
+            event_sink(OrchestrationEvent(EventType.RECOVERY_STARTED, request_id,
+                       {"node_id": node.id, "failure_class": failure_class, "reason": symptom}))
 
         ladder = RECOVERY_TABLE.get(failure_class, [STRATEGY_RETRY_SAME])
         remaining = list(candidate_ids)
@@ -316,6 +355,10 @@ class FailureManager:
                     f"[failure-manager] node '{node.id}': RECOVERED via "
                     f"{strategy} on '{attempt_rid}'"
                 )
+                if event_sink:
+                    event_sink(OrchestrationEvent(EventType.RECOVERY_COMPLETED, request_id,
+                               {"node_id": node.id, "recovered": True, "strategy": strategy,
+                                "resource": attempt_rid}))
                 return retry_output
 
             outcome.attempts.append(
@@ -336,6 +379,9 @@ class FailureManager:
             f"[failure-manager] node '{node.id}': UNRECOVERED after "
             f"{len(outcome.attempts)} attempt(s) -- marking degraded"
         )
+        if event_sink:
+            event_sink(OrchestrationEvent(EventType.RECOVERY_COMPLETED, request_id,
+                       {"node_id": node.id, "recovered": False, "failure_class": failure_class}))
         return self._gap_marker(node, failure_class, best_output)
 
     # -- helpers ------------------------------------------------------------

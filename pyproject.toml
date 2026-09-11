@@ -20,7 +20,11 @@ dependencies = [
 
 [project.scripts]
 aos = "aos_v0.cli:main"
+aos-tui = "aos_v0.tui:main"
 aos-registry-export = "aos_v0.services.registry_export:main"
+
+[project.optional-dependencies]
+tui = ["textual>=0.58,<2.0", "rich>=13,<15"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

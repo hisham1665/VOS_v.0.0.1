@@ -1,4 +1,5 @@
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
@@ -6,6 +7,7 @@ from aos_v0.core.capability_registry import CapabilityRegistry
 from aos_v0.core.failure_manager import FailureManager
 from aos_v0.core.graph_utils import build_waves
 from aos_v0.core.models import Artifact, ArtifactModalityMismatch, Graph
+from aos_v0.core.events import EventType, OrchestrationEvent
 from aos_v0.agents.sub_agent import SubAgent
 
 _print_lock = threading.Lock()
@@ -27,6 +29,10 @@ _IMAGE_FLAGS = frozenset({
     "vision_language",
 })
 
+_DOCUMENT_FLAGS = frozenset({
+    "document.extraction",
+})
+
 
 def _safe_print(msg: str) -> None:
     with _print_lock:
@@ -39,6 +45,8 @@ def _infer_modality(node_flags: set, capability: str) -> Optional[str]:
         return "audio"
     if node_flags & _IMAGE_FLAGS or capability == "vision":
         return "image"
+    if node_flags & _DOCUMENT_FLAGS or capability in ("document_extraction", "document"):
+        return "document"
     return None
 
 
@@ -55,9 +63,17 @@ class GraphExecutor:
         self,
         registry: CapabilityRegistry,
         failure_manager: Optional[FailureManager] = None,
+        event_sink=None,
+        request_id: str = "",
     ):
         self.registry = registry
         self.failure_manager = failure_manager or FailureManager(registry)
+        self.event_sink = event_sink
+        self.request_id = request_id
+
+    def _emit(self, event_type: EventType, **payload) -> None:
+        if self.event_sink:
+            self.event_sink(OrchestrationEvent(event_type, self.request_id, payload))
 
     def run(self, graph: Graph, inputs: Optional[dict[str, str]] = None) -> Graph:
         waves = build_waves(graph)
@@ -69,7 +85,7 @@ class GraphExecutor:
         # same original both receive the correct file.
         artifacts: dict[str, Artifact] = dict(graph.artifacts)
         for modality, path in inputs.items():
-            if modality in ("audio", "image") and path:
+            if modality in ("audio", "image", "document") and path:
                 aid = f"input_{modality}"
                 if aid not in artifacts:
                     artifacts[aid] = Artifact(
@@ -84,6 +100,8 @@ class GraphExecutor:
             )
 
             def _run_node(node):
+                started = time.monotonic()
+                self._emit(EventType.AGENT_STARTED, node_id=node.id, agent=node.capability)
                 # --- determine node input ---
                 if node.data_inputs:
                     # Explicit data_inputs: route specified artifacts, regardless
@@ -150,11 +168,36 @@ class GraphExecutor:
                         f"was identified:\n{audio_ctx}\n\n---\n\n{node.input}"
                     )
 
+                # Inject document context for non-document downstream nodes.
+                # A document-extraction node's output artifact is pathless, so
+                # resolve its text from the completed node's output rather than
+                # passing a placeholder.
+                doc_arts = [
+                    a for a in artifacts.values()
+                    if a.modality == "document" and a.source != "user_input"
+                ]
+                if node.capability not in ("document_extraction", "document") and doc_arts:
+                    doc_parts = []
+                    for a in doc_arts:
+                        resolved = self._resolve_node_output(a, by_id)
+                        doc_parts.append(
+                            resolved or self._read_artifact(a)
+                        )
+                    doc_ctx = "\n\n".join(
+                        f"[DOCUMENT CONTENT]: {part}" for part in doc_parts
+                    )
+                    node.input = (
+                        f"IMPORTANT CONTEXT — a document was extracted and the following "
+                        f"content was identified:\n{doc_ctx}\n\n---\n\n{node.input}"
+                    )
+
                 agent = SubAgent(
                     name=f"sub-agent-{node.id}",
                     capability=node.capability,
                     registry=self.registry,
                     failure_manager=self.failure_manager,
+                    event_sink=self.event_sink,
+                    request_id=self.request_id,
                 )
                 agent.perform(node)
 
@@ -174,6 +217,10 @@ class GraphExecutor:
                     f"[graph-executor] node '{node.id}' {node.status} "
                     f"({len(node.output or '')} chars)"
                 )
+                elapsed_ms = round((time.monotonic() - started) * 1000, 2)
+                event_type = EventType.AGENT_COMPLETED if node.status == "done" else EventType.AGENT_FAILED
+                self._emit(event_type, node_id=node.id, agent=node.capability,
+                           resource=node.bound_resource, status=node.status, elapsed_ms=elapsed_ms)
                 return node
 
             with ThreadPoolExecutor(max_workers=len(wave)) as pool:
@@ -199,7 +246,30 @@ class GraphExecutor:
 
     @staticmethod
     def _read_artifact(artifact: Artifact) -> str:
-        """Read artifact content. For file artifacts, return the path so providers can load it."""
+        """Read artifact content.
+
+        Image/audio artifacts carry a path so vision/ASR providers can load the
+        file themselves. Document artifacts are different: no provider consumes
+        a raw PDF path, so return the *extracted text* so LLM nodes receive
+        real content instead of a useless file path.
+        """
+        if artifact.path and artifact.modality == "document":
+            from aos_v0.capabilities.document import run as extract_document
+            try:
+                content = extract_document(artifact.path)
+            except Exception as exc:  # noqa: BLE001 -- degrade to a visible gap
+                return f"[document extraction failed for {artifact.path}: {exc}]"
+            return content
         if artifact.path:
             return artifact.path
         return f"[artifact {artifact.id} ({artifact.modality})]"
+
+    @staticmethod
+    def _resolve_node_output(artifact: Artifact, nodes_by_id: dict) -> Optional[str]:
+        """For a node-produced artifact, return the node's completed text output."""
+        if artifact.source.startswith("node:"):
+            node_id = artifact.source.split(":", 1)[1]
+            node = nodes_by_id.get(node_id)
+            if node is not None and node.output:
+                return node.output
+        return None
