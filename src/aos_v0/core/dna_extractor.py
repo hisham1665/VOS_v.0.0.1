@@ -123,6 +123,22 @@ _EXTRACT_TOOL = {
 # recognition. The ordering matters -- specific intents must come before the
 # broad "audio" catch-all.
 _HEURISTIC_KEYWORDS: list[tuple[tuple[str, ...], str]] = [
+    # Medical AOS intents -- must come before the generic "image" / "document"
+    # / "summar" heuristics so medical jobs never collapse into the plain pool.
+    (("medical folder", "patient folder", "clinical files", "medical files",
+      "folder of medical", "list the files"), "medical.folder_ingestion"),
+    (("laboratory", "lab report", "blood report", "urine report", "hemogram",
+      "cbc", "lipid profile", "lab values"), "medical.laboratory_analysis"),
+    (("xray", "x-ray", "ct scan", "cat scan", "mri", "radiograph", "ultrasound",
+      "medical image", "scan image", "dicom"), "medical.image_analysis"),
+    (("prescription", "prescri", "medication list", "prescribed medicine",
+      "pharmacy"), "medical.prescription_analysis"),
+    (("discharge summary", "medical report", "clinical summary",
+      "patient summary"), "medical.report_analysis"),
+    (("clinical document", "doctor note", "medical note", "clinical note"),
+     "medical.document_analysis"),
+    (("patient chart", "medical chart", "merge the medical", "medical summary of"),
+     "medical.patient_synthesis"),
     (("image", "photo", "picture", "visual", "diagram"), "vision.understanding"),
     # Document / PDF extraction: reading text out of an uploaded file. Must come
     # before the broad "text.summarization"/"web.search" heuristics so
@@ -174,6 +190,15 @@ _CAPABILITY_TO_FLAG = {
     "speech_transcription": "speech.transcription",
     "audio": "audio_input",
     "document_extraction": "document.extraction",
+    # Medical AOS (2026-09-15): each medical capability maps to exactly one
+    # medical flag so the seeded DNA lets the medical capability resource win.
+    "medical_folder_ingestion": "medical.folder_ingestion",
+    "medical_document_analysis": "medical.document_analysis",
+    "medical_laboratory_analysis": "medical.laboratory_analysis",
+    "medical_image_analysis": "medical.image_analysis",
+    "medical_prescription_analysis": "medical.prescription_analysis",
+    "medical_report_analysis": "medical.report_analysis",
+    "medical_patient_synthesis": "medical.patient_synthesis",
 }
 
 

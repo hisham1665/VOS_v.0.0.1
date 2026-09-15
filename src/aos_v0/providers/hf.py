@@ -485,6 +485,156 @@ def _audio_classification_run(
     return "\n".join(lines)
 
 
+def _image_chat_run(
+    text: str,
+    instruction: Optional[str] = None,
+    *,
+    provider: HFProvider,
+    model: str,
+    system: Optional[str],
+    temperature: float,
+    max_tokens: int,
+) -> str:
+    """Wired run_fn for image-chat (vision-language) completion.
+
+    `text` is treated as the path to an image file. The image is base64-encoded
+    into a data URL so any Inference Provider that serves the model receives a
+    self-contained image (mirrors the vision capability's data-url pattern), and
+    is embedded as an image_url content part beside the instruction. This is the
+    transport used by the medical image capability (MedGemma) and by any other
+    VLM that needs image input over the existing HF adapter.
+    """
+    if not provider.token:
+        raise ProviderAuthenticationError(
+            "Hugging Face image chat requires a token: set HF_TOKEN "
+            "(or HUG) in the environment or .env"
+        )
+    image_path = text.strip()
+    from pathlib import Path as _P
+
+    if not _P(image_path).is_file():
+        raise ProviderError(f"Image chat input is not a valid file: {image_path}")
+
+    import base64 as _b64
+    import mimetypes as _mime
+
+    with open(image_path, "rb") as _fh:
+        image_data = _b64.b64encode(_fh.read()).decode("utf-8")
+    mime, _ = _mime.guess_type(image_path)
+    data_url = f"data:{mime or 'image/png'};base64,{image_data}"
+
+    user_content = instruction or "Describe this image in detail."
+    messages: List[Dict[str, Any]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append(
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": data_url}},
+                {"type": "text", "text": user_content},
+            ],
+        }
+    )
+
+    client = provider._client or provider._build_client()
+    chat_kwargs: Dict[str, Any] = {
+        "messages": messages,
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    try:
+        output = client.chat_completion(**chat_kwargs)
+    except (InferenceTimeoutError, TimeoutError, requests.exceptions.Timeout) as exc:
+        raise ProviderTimeoutError(
+            _redact(f"HF image chat timed out: {exc}", provider.token)
+        ) from exc
+    except (HfHubHTTPError, requests.HTTPError) as exc:
+        raise provider._map_http_error(exc) from exc
+    except requests.exceptions.RequestException as exc:
+        raise ProviderUnavailableError(
+            _redact(f"HF image chat network failure: {exc}", provider.token)
+        ) from exc
+    except ProviderError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ProviderError(
+            _redact(f"HF image chat failed: {exc}", provider.token)
+        ) from exc
+
+    return provider._extract_text(output)
+
+
+def _token_classification_run(
+    text: str,
+    instruction: Optional[str] = None,
+    *,
+    provider: HFProvider,
+    model: str,
+) -> str:
+    """Wired run_fn for token classification (NER) models.
+
+    `text` is the sentence/paragraph to tag. Returns one line per detected
+    entity: label, span, token text and confidence -- enough for downstream
+    capabilities (e.g. medical laboratory analysis) to group entities into
+    structured records. Typed ProviderErrors propagate through the same
+    detect/classify/recover loop as every other resource.
+    """
+    if not provider.token:
+        raise ProviderAuthenticationError(
+            "Hugging Face token classification requires a token: set HF_TOKEN "
+            "(or HUG) in the environment or .env"
+        )
+    inputs = text.strip()
+    if not inputs:
+        return "(no text to classify)"
+
+    client = provider._client or provider._build_client()
+    try:
+        results = client.token_classification(
+            model=model,
+            inputs=inputs,
+        )
+    except StopIteration as exc:
+        raise ProviderUnavailableError(
+            _redact(
+                f"HF token classification: model '{model}' is not deployed on "
+                f"any Inference Provider (no provider maps to this model for "
+                f"token-classification task)",
+                provider.token,
+            )
+        ) from exc
+    except (InferenceTimeoutError, TimeoutError, requests.exceptions.Timeout) as exc:
+        raise ProviderTimeoutError(
+            _redact(f"HF token classification timed out: {exc}", provider.token)
+        ) from exc
+    except (HfHubHTTPError, requests.HTTPError) as exc:
+        raise provider._map_http_error(exc) from exc
+    except requests.exceptions.RequestException as exc:
+        raise ProviderUnavailableError(
+            _redact(f"HF token classification network failure: {exc}", provider.token)
+        ) from exc
+    except ProviderError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ProviderError(
+            _redact(f"HF token classification failed: {exc}", provider.token)
+        ) from exc
+
+    if not results:
+        return "(no entities detected)"
+    lines = []
+    for r in results[:200]:
+        label = getattr(r, "entity_group", None) or getattr(r, "label", "?")
+        word = getattr(r, "word", getattr(r, "entity", ""))
+        score = getattr(r, "score", 0.0)
+        start = getattr(r, "start", 0)
+        end = getattr(r, "end", 0)
+        lines.append(f"{label} | {word} | {score:.3f} | {start}:{end}")
+    return "\n".join(lines)
+
+
 def _build_messages(
     text: str, instruction: Optional[str], system: Optional[str]
 ) -> List[Dict[str, str]]:
@@ -1209,6 +1359,77 @@ HF_MODEL_CATALOG: List[HFModelSpec] = [
         temperature=0.0,
         max_tokens=0,
     ),
+    # ------------------------------------------------------------------
+    # Medical-assistant models (Medical AOS extension, 2026-09-15 sources)
+    # ------------------------------------------------------------------
+    # Google MedGemma 1.5 4B-it -- multimodal medical vision-language model,
+    # the *primary* model for medical image inputs (X-ray / CT / MRI / scans).
+    # It is deliberately NOT flagged with vision.understanding so general
+    # (non-medical) image nodes keep routing to the existing VLM resources; it
+    # only enters the candidate set for nodes that request the medical image
+    # capability. Model name is overridable through MEDICAL_IMAGE_MODEL (the
+    # catalog entry records the configured default; `medical/capabilities.py`
+    # reads the live config value at runtime).
+    HFModelSpec(
+        resource_id="hf_medgemma_1_5_4b_it",
+        model="google/medgemma-1.5-4b-it",
+        resource_class="vlm",
+        task="medical-visual-question-answering",
+        capabilities=[
+            "medical.image_analysis",
+            "vision_input",
+            "image_understanding",
+        ],
+        capability_provenance={
+            "medical.image_analysis": "inferred",
+            "vision_input": "documented",
+            "image_understanding": "documented",
+        },
+        input_type="image",
+        output_type="text",
+        output_format="plain",
+        interface="image_chat_completion",
+        params="4B (it variant, instruction-tuned; medical QA / image description)",
+        context_length="not applicable (image + short instruction)",
+        modality="image + text -> text",
+        source="https://huggingface.co/google/medgemma-1.5-4b-it",
+        price="not published (router; billed per compute)",
+        system=(
+            "You are a cautious medical imaging assistant. Describe only what "
+            "the image shows. Never assert a confirmed diagnosis: phrase every "
+            "finding as an observation that requires physician/radiologist "
+            "confirmation, and state uncertainty explicitly."
+        ),
+        temperature=0.2,
+        max_tokens=1024,
+    ),
+    # Healthcare Brain -- laboratory NER extraction model. Used as the initial
+    # laboratory NER/extraction model by the medical laboratory capability.
+    HFModelSpec(
+        resource_id="hf_healthcare_brain_lab_ner",
+        model="genzeonplatform/healthcare-brain-laboratory-ner",
+        resource_class="api",
+        task="token-classification",
+        capabilities=[
+            "medical.laboratory_analysis",
+        ],
+        capability_provenance={
+            "medical.laboratory_analysis": "inferred",
+        },
+        input_type="text",
+        output_type="structured",
+        output_format="json",
+        interface="token_classification",
+        params="NER over laboratory report text (labels: test name, value, "
+        "unit, reference range, status, ...)",
+        context_length="sentence/document length (NER)",
+        modality="text -> entity spans",
+        source="https://huggingface.co/genzeonplatform/healthcare-brain-laboratory-ner",
+        price="not published (router; billed per compute)",
+        system="",
+        temperature=0.0,
+        max_tokens=0,
+    ),
 ]
 
 
@@ -1250,8 +1471,19 @@ def build_hf_manifests(
         LatencyModel,
     )
     from aos_v0.config import HF_PROVIDER as _CFG_PROVIDER
+    from aos_v0.config import MEDICAL_IMAGE_MODEL as _CFG_MED_IMAGE
+    from aos_v0.config import MEDICAL_LAB_MODEL as _CFG_MED_LAB
 
     hf_provider_sel = provider or _CFG_PROVIDER
+
+    # Medical catalog entries record their documented default model id; at
+    # build time the live env/config value wins so the registry always reflects
+    # what the medical capabilities will actually call (MEDICAL_IMAGE_MODEL /
+    # MEDICAL_LAB_MODEL override the defaults without code changes).
+    _CONFIG_MODEL_OVERRIDES = {
+        "hf_medgemma_1_5_4b_it": _CFG_MED_IMAGE,
+        "hf_healthcare_brain_lab_ner": _CFG_MED_LAB,
+    }
 
     manifests = []
     for spec in HF_MODEL_CATALOG:
@@ -1261,8 +1493,15 @@ def build_hf_manifests(
             "automatic_speech_recognition",
             "audio_chat_completion",
             "audio_classification",
+            "image_chat_completion",
+            "token_classification",
         }
         transport = "wired" if spec.interface in _wired_interfaces else "declared"
+        model_id = spec.model
+        if spec.resource_id in _CONFIG_MODEL_OVERRIDES:
+            override = _CONFIG_MODEL_OVERRIDES[spec.resource_id]
+            if override:
+                model_id = override
         manifests.append(
             CapabilityManifest(
                 resource_id=spec.resource_id,
@@ -1279,7 +1518,7 @@ def build_hf_manifests(
                 metadata={
                     "provider": "huggingface",
                     "hf_provider": hf_provider_sel,
-                    "model": spec.model,
+                    "model": model_id,
                     "task": spec.task,
                     "interface": spec.interface,
                     "transport": transport,
@@ -1378,9 +1617,21 @@ def register_hf_resources(
     """
     manifests = build_hf_manifests(provider=provider)
 
+    # Map a spec's run binding to the same live configured model the manifest
+    # builder advertised, so the run_fn and the manifest never diverge.
+    from aos_v0.config import (
+        MEDICAL_IMAGE_MODEL as _CFG_MED_IMAGE,
+        MEDICAL_LAB_MODEL as _CFG_MED_LAB,
+    )
+    _MODEL_BY_SPEC = {
+        "hf_medgemma_1_5_4b_it": _CFG_MED_IMAGE or "google/medgemma-1.5-4b-it",
+        "hf_healthcare_brain_lab_ner": _CFG_MED_LAB or "genzeonplatform/healthcare-brain-laboratory-ner",
+    }
+
     run_fns = {}
     for spec in HF_MODEL_CATALOG:
-        hf = HFProvider(model=spec.model, provider=provider, client=client)
+        bound_model = _MODEL_BY_SPEC.get(spec.resource_id, spec.model)
+        hf = HFProvider(model=bound_model, provider=provider, client=client)
 
         if spec.interface == "chat_completion":
             run_fns[spec.resource_id] = partial(
@@ -1394,13 +1645,13 @@ def register_hf_resources(
             run_fns[spec.resource_id] = partial(
                 _asr_run,
                 provider=hf,
-                model=spec.model,
+                model=bound_model,
             )
         elif spec.interface == "audio_chat_completion":
             run_fns[spec.resource_id] = partial(
                 _audio_chat_run,
                 provider=hf,
-                model=spec.model,
+                model=bound_model,
                 system=spec.system,
                 temperature=spec.temperature,
                 max_tokens=spec.max_tokens,
@@ -1409,7 +1660,22 @@ def register_hf_resources(
             run_fns[spec.resource_id] = partial(
                 _audio_classification_run,
                 provider=hf,
-                model=spec.model,
+                model=bound_model,
+            )
+        elif spec.interface == "image_chat_completion":
+            run_fns[spec.resource_id] = partial(
+                _image_chat_run,
+                provider=hf,
+                model=bound_model,
+                system=spec.system,
+                temperature=spec.temperature,
+                max_tokens=spec.max_tokens,
+            )
+        elif spec.interface == "token_classification":
+            run_fns[spec.resource_id] = partial(
+                _token_classification_run,
+                provider=hf,
+                model=bound_model,
             )
         else:
             run_fns[spec.resource_id] = _declared_only_run(

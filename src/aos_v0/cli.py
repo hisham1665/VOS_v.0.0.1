@@ -31,11 +31,22 @@ def run(
     budget_usd: float = DEFAULT_BUDGET_USD,
     context: RequestContext | None = None,
     event_sink=None,
+    *,
+    registry=None,
+    manager=None,
+    dna_extractor=None,
 ) -> str:
     """Execute the established kernel, optionally publishing real lifecycle events.
 
     The first three parameters are the original public CLI API. `context` and
     `event_sink` are adapters for interactive/API clients and are optional.
+
+    The Medical AOS extension is additive: `registry`, `manager` and
+    `dna_extractor` inject counterparts for the kernel's three decision points
+    (resource pool, planner, DNA extraction). All default to the stock
+    components, so existing callers are byte-for-byte unaffected; a medical
+    client passes the registry that already has the medical capabilities
+    registered and a manager/dna_extractor tuned for the medical vocabulary.
 
     All terminal output during this call is captured to a log file in log/.
     The file path is available via the ``log_path`` keyword in the returned
@@ -51,11 +62,11 @@ def run(
 
         emit(EventType.REQUEST_RECEIVED, prompt=user_prompt,
              artifacts=[artifact.model_dump() for artifact in (context.artifacts if context else [])])
-        registry = build_hf_enabled_registry()
+        registry = registry or build_hf_enabled_registry()
 
         # M2 -- decomposition only. The planner no longer reasons about resources,
         # and the kernel appends the terminal synthesis node itself.
-        manager = ManagerAgent()
+        manager = manager or ManagerAgent()
         graph = manager.create_plan(user_prompt, inputs)
         if context:
             graph.artifacts.update({artifact.id: artifact for artifact in context.artifacts})
@@ -64,7 +75,7 @@ def run(
         # M4 -- Capability DNA extraction: flags + ordinals only.
         capability_started = time.monotonic()
         emit(EventType.CAPABILITY_ANALYSIS_STARTED, node_count=len(graph.nodes))
-        graph = DNAExtractor().extract_graph(graph)
+        graph = (dna_extractor or DNAExtractor()).extract_graph(graph)
         emit(EventType.CAPABILITY_DETECTED, elapsed_ms=round((time.monotonic() - capability_started) * 1000, 2),
              nodes=[{"node_id": node.id, "flags": node.dna.flags if node.dna else []} for node in graph.nodes])
 
@@ -264,6 +275,34 @@ def main(args: list[str] | None = None) -> None:
 
     budget_arg = _pop_flag(args, "--budget")
     budget = float(budget_arg) if budget_arg else DEFAULT_BUDGET_USD
+
+    # Medical AOS: --medical-folder <dir> turns the run into a Medical workflow.
+    medical_folder = _pop_flag(args, "--medical-folder")
+    if medical_folder:
+        from aos_v0.core.capability_registry import CapabilityRegistry
+        from aos_v0.medical.registration import register_medical_resources
+        from aos_v0.medical.workflow import build_medical_job
+
+        if not Path(medical_folder).is_dir():
+            print(f"Error: medical folder not found: {medical_folder}")
+            sys.exit(1)
+
+        if "--use-inputs-folder" in args:
+            args.remove("--use-inputs-folder")
+        for flag in ("--input", "--audio", "--image"):
+            while flag in args:
+                idx = args.index(flag)
+                if idx + 1 < len(args):
+                    del args[idx : idx + 2]
+                else:
+                    args.pop(idx)
+
+        prompt = " ".join(args) if args else ""
+        job_prompt, _manifests = build_medical_job(medical_folder, prompt)
+
+        registry = register_medical_resources(build_hf_enabled_registry())
+        run(job_prompt, budget_usd=budget, registry=registry)
+        return
 
     # Collect all typed inputs (--input, --audio, --image, inputs/ folder).
     inputs = _collect_inputs(args)

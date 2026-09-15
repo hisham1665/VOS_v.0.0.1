@@ -33,3 +33,14 @@ HF_PROVIDER: str = os.environ.get("HF_PROVIDER", "auto")
 
 # Default model id for HF-backed resources. Overridable per call / per resource.
 HF_MODEL: str = os.environ.get("HF_MODEL", "")
+
+# Medical-assistant model configuration (Medical AOS extension). Read through
+# the same environment/config convention as the existing model settings; no
+# credentials live here -- the HF token above is shared by every HF-backed
+# resource including the medical models.
+MEDICAL_IMAGE_MODEL: str = os.environ.get(
+    "MEDICAL_IMAGE_MODEL", "google/medgemma-1.5-4b-it"
+)
+MEDICAL_LAB_MODEL: str = os.environ.get(
+    "MEDICAL_LAB_MODEL", "genzeonplatform/healthcare-brain-laboratory-ner"
+)

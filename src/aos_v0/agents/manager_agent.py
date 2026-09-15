@@ -15,8 +15,14 @@ from aos_v0.core.diagram_utils import build_mermaid
 from aos_v0.core.models import CapabilityDNA, DNAOrdinals, Graph, Node
 
 # The planner may only choose among these. "synthesis" is deliberately absent:
-# the kernel appends the terminal synthesis node itself.
-_CAPABILITIES = ["web_search", "summarization", "vision", "speech_transcription", "audio", "document_extraction"]
+# the kernel appends the terminal synthesis node itself. The medical_* entries
+# are available to every planner but only used when the job is a Medical AOS
+# job (the --medical-folder prompt embeds the MEDICAL WORKFLOW directive).
+_CAPABILITIES = ["web_search", "summarization", "vision", "speech_transcription", "audio", "document_extraction",
+                 "medical_folder_ingestion", "medical_document_analysis",
+                 "medical_laboratory_analysis", "medical_image_analysis",
+                 "medical_prescription_analysis", "medical_report_analysis",
+                 "medical_patient_synthesis"]
 
 _SYNTHESIS_NODE_ID = "final"
 
@@ -80,6 +86,14 @@ nodes — one per distinct analysis task — all depending on [] (all are root \
 nodes). They will receive the original media artifact. Do NOT merge \
 independent analyses into a single node. If no media is mentioned, do NOT \
 include a media-processing node.
+
+If the job is a MEDICAL WORKFLOW (the prompt embeds the "MEDICAL WORKFLOW \
+(requested via --medical-folder)" directive and a【MEDICAL:file-manifest】block), \
+plan it using ONLY the medical_* capabilities and follow the directive's \
+node structure exactly: one 'medical_folder_ingestion' root node, one analysis \
+node PER medical category that depends on it, and one 'medical_patient_synthesis' \
+node depending on ALL analysis nodes. Do not use web_search, vision, or \
+document_extraction for a medical workflow job.
 
 The id for each node must be a simple string like "a", "b", "c", etc.
 

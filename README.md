@@ -31,6 +31,7 @@ AOS is designed as a minimal, composable, deterministic, and auditable microkern
 - [Installation & Setup](#installation--setup)
 - [Usage](#usage)
 - [Configuration](#configuration)
+- [Medical AOS Extension](#medical-aos-extension)
 - [Design Decisions](#design-decisions)
 - [Upgrade Path](#upgrade-path)
 
@@ -783,6 +784,45 @@ Important configuration concepts include:
 | μ                          | Latency penalty in resource scoring          |
 
 The exact configuration mechanism depends on the project environment.
+
+## Medical AOS Extension
+
+The Medical AOS extension is a doctor-assistant workflow built additively on top
+of the standard kernel: it introduces seven medical capabilities without
+touching any existing planning, DNA, routing, or execution algorithm.
+
+- `medical_folder_ingestion` — scans a patient folder and emits a machine-readable `【MEDICAL:file-manifest】…【/MEDICAL】` block.
+- `medical_document_analysis` — reads clinical documents/doctor notes.
+- `medical_laboratory_analysis` — extracts lab values from blood/urine reports (NER first, deterministic fallback), statuses derived only from the report's own reference ranges.
+- `medical_image_analysis` — MedGemma visual description with mandatory physician/radiologist confirmation.
+- `medical_prescription_analysis` — extracts medicine/dose/frequency rows.
+- `medical_report_analysis` — extracts conditions and demographics from reports/discharge summaries.
+- `medical_patient_synthesis` — merges every analysis node into a deterministic Patient Chart with per-row source attribution.
+
+Run a medical workflow against a folder of patient files:
+
+```bash
+python -m aos_v0 --medical-folder data/inputs/patient1 "Build a chart from these labs"
+```
+
+`--medical-folder <dir>` pre-scans the folder, embeds the file manifest and a
+MEDICAL WORKFLOW directive in the job prompt, and registers the medical
+capabilities on top of the standard registry. The kernel plans, extracts DNA,
+routes, and executes exactly as it does for any other job — the medical
+capabilities are ordinary manifests.
+
+Medical models (optional; require a shared `HF_TOKEN` as documented above):
+
+| Variable            | Default model                                        |
+|---------------------|------------------------------------------------------|
+| `MEDICAL_IMAGE_MODEL` | `google/medgemma-1.5-4b-it`                          |
+| `MEDICAL_LAB_MODEL`   | `genzeonplatform/healthcare-brain-laboratory-ner`     |
+
+Safety behavior is enforced inside the capability implementations: imaging
+findings are always flagged "Requires physician/radiologist confirmation", lab
+statuses come only from the report's own ranges or explicit status, and every
+row in the Patient Chart names its source file and page. The chart itself is a
+structured aggregation of the source documents, not a medical opinion.
 
 ## Design Decisions
 

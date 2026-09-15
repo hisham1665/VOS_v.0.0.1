@@ -90,6 +90,19 @@ CAPABILITY_FLAGS = [
     "image_representation",
     "visual_embedding",
     "image_similarity",
+    # Medical-assistant capabilities (Medical AOS extension). Registered in the
+    # same vocabulary as every other flag so the Manager / DNA extractor /
+    # Capability Registry route them through the identical mechanisms as the
+    # existing capabilities. Each maps to a capability-manifest resource in
+    # `medical/registration.py`; the corresponding agents live in
+    # `medical/capabilities.py`.
+    "medical.folder_ingestion",
+    "medical.document_analysis",
+    "medical.laboratory_analysis",
+    "medical.image_analysis",
+    "medical.prescription_analysis",
+    "medical.report_analysis",
+    "medical.patient_synthesis",
 ]
 
 # Ordinal axes, scored 0-4. These describe *how hard* the subtask is along each
