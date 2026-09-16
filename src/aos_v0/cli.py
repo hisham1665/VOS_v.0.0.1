@@ -31,19 +31,18 @@ def run(
     budget_usd: float = DEFAULT_BUDGET_USD,
     context: RequestContext | None = None,
     event_sink=None,
+    session_bank=None,
 ) -> str:
-    """Execute the established kernel, optionally publishing real lifecycle events.
-
-    The first three parameters are the original public CLI API. `context` and
-    `event_sink` are adapters for interactive/API clients and are optional.
-
-    All terminal output during this call is captured to a log file in log/.
-    The file path is available via the ``log_path`` keyword in the returned
-    event or can be retrieved from the SessionLogger if needed.
-    """
+    """Execute the established kernel, optionally publishing real lifecycle events."""
+    from aos_v0.core.shared_memory import SharedMemoryBank
+    from aos_v0.config import AOS_MEMORY
+    
     with SessionLogger(prompt=user_prompt, tag="run") as _logger:
         request_id = context.request_id if context else ""
         started = time.monotonic()
+
+        # Initialize Request-tier Memory Bank if AOS_MEMORY is enabled
+        request_bank = SharedMemoryBank(request_id, session_bank) if AOS_MEMORY else None
 
         def emit(kind: EventType, **payload) -> None:
             if event_sink:
@@ -53,36 +52,26 @@ def run(
              artifacts=[artifact.model_dump() for artifact in (context.artifacts if context else [])])
         registry = build_hf_enabled_registry()
 
-        # M2 -- decomposition only. The planner no longer reasons about resources,
-        # and the kernel appends the terminal synthesis node itself.
         manager = ManagerAgent()
         graph = manager.create_plan(user_prompt, inputs)
         if context:
             graph.artifacts.update({artifact.id: artifact for artifact in context.artifacts})
         emit(EventType.INTENT_DETECTED, planned_capabilities=[node.capability for node in graph.nodes])
 
-        # M4 -- Capability DNA extraction: flags + ordinals only.
         capability_started = time.monotonic()
         emit(EventType.CAPABILITY_ANALYSIS_STARTED, node_count=len(graph.nodes))
         graph = DNAExtractor().extract_graph(graph)
         emit(EventType.CAPABILITY_DETECTED, elapsed_ms=round((time.monotonic() - capability_started) * 1000, 2),
              nodes=[{"node_id": node.id, "flags": node.dna.flags if node.dna else []} for node in graph.nodes])
 
-        # Constraints are kernel-derived, never model-invented. Budget is divided
-        # across the plan, so a wide graph automatically routes cheaper.
         ConstraintPolicy(registry, job_budget_usd=budget_usd).apply(graph)
-
-        # Admission control seed (DOC1 M2): reject before spending anything if the
-        # registry simply cannot provide a capability the plan requires.
         _check_satisfiable(graph, registry)
-
-        # Re-render the plan artifact now that every node carries its full DNA.
         manager.write_plan(graph)
 
-        # M5 routing + M8 recovery happen per node, inside the executor.
         failure_manager = FailureManager(registry)
         emit(EventType.ROUTING_STARTED, node_count=len(graph.nodes))
-        graph = GraphExecutor(registry, failure_manager, event_sink=event_sink, request_id=request_id).run(graph, inputs)
+        # Pass memory bank to GraphExecutor
+        graph = GraphExecutor(registry, failure_manager, event_sink=event_sink, request_id=request_id, memory_bank=request_bank).run(graph, inputs)
 
         final_output = IntegratorAgent().integrate(graph)
         emit(EventType.RESULT_READY, result=final_output)
@@ -90,6 +79,13 @@ def run(
              status="completed")
 
         _print_routing_summary(graph)
+        if request_bank:
+            _print_memory_summary(request_bank)
+            request_bank.promote_to_session()
+            dump_file = f"log/memory_dump_{request_id or int(time.time())}.txt"
+            request_bank.dump_to_text(dump_file)
+            print(f"  [memory] detailed dump saved to: {dump_file}")
+            
         print("\n" + failure_manager.report())
 
         print("\n=== FINAL OUTPUT ===")
@@ -140,6 +136,19 @@ def _print_routing_summary(graph) -> None:
         f"{relaxed_routed}/{total} relaxed (degraded), "
         f"{total - dna_routed - relaxed_routed}/{total} other"
     )
+
+def _print_memory_summary(bank) -> None:
+    stats = bank.get_stats()
+    print("\n=== MEMORY SUMMARY ===")
+    print(f"  Request tier: {len(bank.entries)} entries")
+    if bank.session_bank:
+        print(f"  Session tier: {len(bank.session_bank.entries)} entries")
+    print(f"  Total bytes: {stats.total_bytes}")
+    for entry in bank.get_request_entries():
+        if entry.recall_count > 0:
+            print(f"  [RECALLED {entry.recall_count}x] {entry.id}: {entry.key}")
+        else:
+            print(f"  [UNUSED] {entry.id}: {entry.key}")
 
 
 def _detect_input_type(path: str) -> str:

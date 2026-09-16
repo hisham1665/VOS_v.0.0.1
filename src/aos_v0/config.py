@@ -5,6 +5,7 @@ load_dotenv()
 
 import httpx
 
+_MODEL = "openai/gpt-oss-20b"
 
 def insecure_http_client() -> httpx.Client:
     """Return an httpx client with SSL verification disabled.
@@ -33,3 +34,9 @@ HF_PROVIDER: str = os.environ.get("HF_PROVIDER", "auto")
 
 # Default model id for HF-backed resources. Overridable per call / per resource.
 HF_MODEL: str = os.environ.get("HF_MODEL", "")
+
+# Shared memory configuration
+AOS_MEMORY: bool = os.environ.get("AOS_MEMORY", "1").lower() in ("1", "true", "yes")
+MEMORY_MAX_ENTRIES: int = int(os.environ.get("MEMORY_MAX_ENTRIES", "64"))
+MEMORY_MAX_TOTAL_BYTES: int = int(os.environ.get("MEMORY_MAX_TOTAL_BYTES", "512000"))
+MEMORY_MIN_SUBSTANCE_CHARS: int = int(os.environ.get("MEMORY_MIN_SUBSTANCE_CHARS", "200"))

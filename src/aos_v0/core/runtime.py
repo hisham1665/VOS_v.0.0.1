@@ -25,6 +25,15 @@ class RequestContext:
 
 
 @dataclass
+class MemoryTelemetry:
+    admitted: int = 0
+    discarded: int = 0
+    reused: int = 0
+    recalled: int = 0
+    tokens_saved: int = 0
+    bytes_injected: int = 0
+
+@dataclass
 class Telemetry:
     request_latency_ms: float = 0.0
     capability_latency_ms: float = 0.0
@@ -34,7 +43,7 @@ class Telemetry:
     failures: int = 0
     recoveries: int = 0
     model_used: List[str] = field(default_factory=list)
-
+    memory: MemoryTelemetry = field(default_factory=MemoryTelemetry)
 
 @dataclass
 class Session:
@@ -45,6 +54,9 @@ class Session:
     results: Dict[str, str] = field(default_factory=dict)
     telemetry: Telemetry = field(default_factory=Telemetry)
     started_at: float = field(default_factory=time.monotonic)
+    
+    # We delay typing to avoid circular import, we'll just use Any
+    memory_bank: Any = None
 
     def record_event(self, event: OrchestrationEvent) -> None:
         self.events.append(event)

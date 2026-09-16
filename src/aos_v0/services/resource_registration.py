@@ -18,6 +18,7 @@ from aos_v0.core.capability_registry import (
     IOSchema,
     LatencyModel,
 )
+from aos_v0.config import _MODEL
 
 
 def _print_manifest_table(manifests) -> None:
@@ -73,7 +74,7 @@ def build_default_registry() -> CapabilityRegistry:
             risk_class="medium",
             metadata={
                 "provider": "groq",
-                "model": "qwen/qwen3.6-27b",
+                "model": _MODEL,
                 "pipeline": "ddgs_search+groq",
             },
         ),
@@ -104,7 +105,7 @@ def build_default_registry() -> CapabilityRegistry:
             risk_class="low",
             metadata={
                 "provider": "groq",
-                "model": "qwen/qwen3.6-27b",
+                "model": _MODEL,
             },
         ),
         # Local Ollama vision model: free per call, but slow, hence the wide p95.
@@ -191,7 +192,7 @@ def build_default_registry() -> CapabilityRegistry:
             risk_class="low",
             metadata={
                 "provider": "groq",
-                "model": "qwen/qwen3.6-27b",
+                "model": _MODEL,
             },
         ),
         # Cheap extractive pass over the same model with a terser instruction.
@@ -216,7 +217,7 @@ def build_default_registry() -> CapabilityRegistry:
             risk_class="low",
             metadata={
                 "provider": "groq",
-                "model": "qwen/qwen3.6-27b",
+                "model": _MODEL,
             },
         ),
     ]

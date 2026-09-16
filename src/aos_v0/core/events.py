@@ -23,6 +23,11 @@ class EventType(StrEnum):
     RECOVERY_COMPLETED = "recovery_completed"
     RESULT_READY = "result_ready"
     REQUEST_COMPLETED = "request_completed"
+    MEMORY_ADMITTED = "memory_admitted"
+    MEMORY_DISCARDED = "memory_discarded"
+    MEMORY_RECALLED = "memory_recalled"
+    MEMORY_REUSE_HIT = "memory_reuse_hit"
+    MEMORY_EVICTED = "memory_evicted"
 
 
 @dataclass(frozen=True)

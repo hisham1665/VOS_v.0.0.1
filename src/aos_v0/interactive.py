@@ -57,13 +57,18 @@ class InteractiveService:
             selected = self.session.artifacts
         context = RequestContext.create(self.session.session_id, prompt, selected)
         self.session.requests.append(context)
-        # Existing manager/executor accepts one direct media path per modality.
-        # Full references remain on graph.artifacts for any future capability.
+        
+        from aos_v0.config import AOS_MEMORY
+        from aos_v0.core.shared_memory import SharedMemoryBank
+        
+        if AOS_MEMORY and getattr(self.session, 'memory_bank', None) is None:
+            self.session.memory_bank = SharedMemoryBank("session_tier")
+
         inputs = {}
         for artifact in selected:
             if artifact.modality in {"image", "audio", "document"} and artifact.path:
                 inputs.setdefault(artifact.modality, artifact.path)
-        result = run(prompt, inputs or None, budget_usd, context, self.events.emit)
+        result = run(prompt, inputs or None, budget_usd, context, self.events.emit, session_bank=getattr(self.session, 'memory_bank', None))
         self.session.results[context.request_id] = result
         return result
 
