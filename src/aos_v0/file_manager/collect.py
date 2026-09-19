@@ -14,6 +14,7 @@ Input Precedence: Ensures explicit CLI arguments override dropbox-scanned files.
 """
 
 from pathlib import Path
+import sys
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 _AUDIO_EXTS = {".wav", ".mp3", ".ogg", ".flac", ".m4a", ".wma", ".aac"}

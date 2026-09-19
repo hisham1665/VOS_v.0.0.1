@@ -1,5 +1,5 @@
 """
-his script serves as the primary execution engine and orchestrator for the aos_v0 system,
+This script serves as the primary execution engine and orchestrator for the aos_v0 system,
 defining the central run() pipeline that manages the full lifecycle of a user request
 from input to final output.
 """
