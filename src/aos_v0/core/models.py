@@ -90,6 +90,30 @@ CAPABILITY_FLAGS = [
     "image_representation",
     "visual_embedding",
     "image_similarity",
+    # Exam-evaluation capabilities (Phase 1 registration). Dotted family names
+    # follow the same vocabulary rule as everything above, so both CapabilityDNA
+    # (a subtask lists the flags it REQUIRES) and CapabilityManifest (a resource
+    # lists the flags it PROVIDES) can express the exam pipeline. Kept additive:
+    # no existing flag's meaning changes.
+    "document.ocr",
+    "handwriting.ocr",
+    "document.layout",
+    "student_id.extraction",
+    "question.segmentation",
+    "answer.extraction",
+    "text.normalization",
+    "semantic.embedding",
+    "concept.extraction",
+    "semantic.answer_evaluation",
+    "rubric.evaluation",
+    "mathematical.evaluation",
+    "diagram.evaluation",
+    "answer.verification",
+    "evaluation.reconciliation",
+    "confidence.estimation",
+    "batch.processing",
+    "report.generation",
+    "csv.generation",
 ]
 
 # Ordinal axes, scored 0-4. These describe *how hard* the subtask is along each

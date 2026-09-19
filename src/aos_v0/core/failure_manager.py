@@ -33,6 +33,7 @@ CLASS_RESOURCE_OUTAGE = "resource.outage"
 CLASS_RESOURCE_DEGRADED = "resource.degraded"
 CLASS_TOOL_EMPTY_RESULT = "tool.empty_result"
 CLASS_TOOL_OUTPUT_CORRUPT = "tool.output_corrupt"
+CLASS_TOOL_LOW_CONFIDENCE = "tool.low_confidence"
 CLASS_REASONING_REFUSAL = "reasoning.refusal"
 
 # --- recovery strategies (DOC1 M8 stage 3) ---------------------------------
@@ -65,6 +66,13 @@ RECOVERY_TABLE: dict[str, List[str]] = {
         STRATEGY_RESOURCE_SUBSTITUTION,
         STRATEGY_RETRY_WITH_FEEDBACK,
     ],
+    # A recognized-but-unreadable result (e.g. structured OCR output with a
+    # low confidence field) is a quality failure, not an outage: ask the model
+    # to try harder / wider, then move resources. Never treat it as healthy.
+    CLASS_TOOL_LOW_CONFIDENCE: [
+        STRATEGY_RETRY_WITH_FEEDBACK,
+        STRATEGY_RESOURCE_SUBSTITUTION,
+    ],
     # A model declining the task will decline it again; only rephrasing helps.
     CLASS_REASONING_REFUSAL: [STRATEGY_RETRY_WITH_FEEDBACK],
 }
@@ -90,6 +98,15 @@ _CORRUPT_PATTERNS = [
 _REFUSAL_PATTERNS = [
     re.compile(r"\bI (?:cannot|can't|am unable to) (?:assist|help|provide)\b", re.IGNORECASE),
     re.compile(r"\bas an AI language model\b", re.IGNORECASE),
+]
+
+# Structured OCR output carries an explicit confidence field. A recognized-but-
+# unreadable read is a *quality* failure: the tool worked, its output just
+# cannot be trusted. The pattern is deliberately narrow (JSON-ish key + colon
+# + 0.x below 0.6) so ordinary prose about confidence never trips it.
+_LOW_CONFIDENCE_PATTERNS = [
+    re.compile(r"\bconfidence\b[\"':=\s]{0,8}0\.[0-5]", re.IGNORECASE),
+    re.compile(r"\bavg[_-]?conf(?:idence)?[\"':=\s]{0,8}0\.[0-5]", re.IGNORECASE),
 ]
 
 # Media node denial patterns. A node that REQUIRES an image/audio input but
@@ -215,6 +232,16 @@ class FailureManager:
                 )
                 break
 
+        # Low-confidence structured output (OCR/quality node contract).
+        for pattern in _LOW_CONFIDENCE_PATTERNS:
+            if pattern.search(output):
+                detections.append(
+                    Detection(
+                        CLASS_TOOL_LOW_CONFIDENCE, f"matched {pattern.pattern!r}"
+                    )
+                )
+                break
+
         # Length check runs last and only if nothing else fired, so a short but
         # legitimately terse answer is not double-reported.
         if not detections and len(output.strip()) < _MIN_USEFUL_CHARS:
@@ -246,6 +273,7 @@ class FailureManager:
             CLASS_TOOL_OUTPUT_CORRUPT,
             CLASS_REASONING_REFUSAL,
             CLASS_TOOL_EMPTY_RESULT,
+            CLASS_TOOL_LOW_CONFIDENCE,
             CLASS_RESOURCE_DEGRADED,
         ]
         fired = {d.failure_class for d in detections}

@@ -1,0 +1,337 @@
+{
+  "exam_id": "CN-2026-A",
+  "title": "Computer Networks — Mid Semester Examination",
+  "subject": "Computer Networks",
+  "version": "1",
+  "institution": "Example Institute of Technology",
+  "exam_date": "2026-05-18",
+  "duration_minutes": 180,
+  "instructions": "Answer all questions. Diagrams and derivations count toward the named rubric criteria only.",
+  "marking_rules": {
+    "negative_marking_default": 0.0,
+    "partial_credit_default": true,
+    "max_marks_floor": 0.0,
+    "rounding": "half_up"
+  },
+  "questions": [
+    {
+      "question_id": "Q1",
+      "text": "Which switching technique forwards a frame only after the entire frame has been received?",
+      "max_marks": 1,
+      "question_type": "mcq",
+      "negative_marks": 0.25,
+      "answer_key": {
+        "reference_answers": ["b. Store-and-forward switching"],
+        "expected_concepts": ["store-and-forward switching"],
+        "accepted_alternatives": [],
+        "keywords": ["entire frame", "forward after receive"]
+      }
+    },
+    {
+      "question_id": "Q2",
+      "text": "True or False: UDP provides congestion control.",
+      "max_marks": 1,
+      "question_type": "true_false",
+      "answer_key": {
+        "reference_answers": ["false"],
+        "expected_concepts": ["no congestion control in UDP"],
+        "keywords": ["best effort"]
+      }
+    },
+    {
+      "question_id": "Q3",
+      "text": "The layer responsible for end-to-end communication and port-based demultiplexing is the ______ layer.",
+      "max_marks": 2,
+      "question_type": "fill_blank",
+      "answer_key": {
+        "reference_answers": ["transport"],
+        "accepted_alternatives": ["transport layer", "layer 4"],
+        "expected_concepts": ["transport layer purpose"]
+      }
+    },
+    {
+      "question_id": "Q4",
+      "text": "Distinguish circuit switching from packet switching.",
+      "max_marks": 4,
+      "question_type": "short_answer",
+      "answer_key": {
+        "reference_answers": [
+          "Circuit switching establishes a dedicated path end to end for the whole call duration and reserves bandwidth; packet switching sends data in independently routed packets that share links on demand."
+        ],
+        "expected_concepts": [
+          "circuit switching",
+          "packet switching",
+          "connection establishment",
+          "store and forward"
+        ],
+        "accepted_alternatives": ["virtual circuit", "connectionless datagram"],
+        "keywords": ["dedicated path", "bandwidth reservation", "statistical multiplexing"],
+        "concept_relationships": [
+          {
+            "source": "packet switching",
+            "relationship": "implies",
+            "target": "store and forward",
+            "weight": 1.0,
+            "description": "routing each packet independently is a form of store-and-forward"
+          },
+          {
+            "source": "circuit switching",
+            "relationship": "requires",
+            "target": "connection establishment",
+            "weight": 1.0
+          }
+        ]
+      },
+      "rubric": {
+        "criteria": [
+          { "criterion": "definition", "marks": 1.5, "description": "correct definition of both techniques" },
+          { "criterion": "connection_establishment", "marks": 1.5, "description": "explains the resource-reservation difference" },
+          { "criterion": "comparison", "marks": 1, "description": "identifies a valid efficiency/trade-off point" }
+        ]
+      },
+      "partial_credit_rules": [
+        { "criterion": "definition", "fraction": 0.5, "description": "defines only one of the two techniques" },
+        { "criterion": "comparison", "fraction": 0.5, "description": "comparison stated without justification" }
+      ]
+    },
+    {
+      "question_id": "Q5",
+      "text": "Explain deadlock in operating systems. State the four necessary conditions and outline one prevention strategy.",
+      "max_marks": 10,
+      "question_type": "long_answer",
+      "answer_key": {
+        "reference_answers": [
+          "Deadlock is a state where a set of processes are blocked because each holds a resource and waits for another resource held by another process in the set. The four necessary conditions are mutual exclusion, hold and wait, no preemption, and circular wait. Prevention breaks one condition, e.g. requesting all resources up front removes hold and wait."
+        ],
+        "expected_concepts": [
+          "definition",
+          "mutual exclusion",
+          "hold and wait",
+          "no preemption",
+          "circular wait",
+          "deadlock prevention"
+        ],
+        "accepted_alternatives": ["resource holding", "non-preemptive scheduling"],
+        "keywords": ["blocked", "resource", "waits-for cycle"],
+        "concept_relationships": [
+          {
+            "source": "hold and wait",
+            "relationship": "alternative",
+            "target": "resource holding",
+            "weight": 1.0,
+            "description": "'resource holding' is accepted terminology for the same condition"
+          },
+          {
+            "source": "circular wait",
+            "relationship": "requires",
+            "target": "mutual exclusion",
+            "weight": 1.0,
+            "description": "a genuine circular wait presupposes non-sharable resources"
+          },
+          {
+            "source": "deadlock prevention",
+            "relationship": "requires",
+            "target": "hold and wait",
+            "weight": 1.0,
+            "description": "prevention is credited only if the student breaks one named condition"
+          }
+        ]
+      },
+      "rubric": {
+        "criteria": [
+          { "criterion": "definition", "marks": 2, "description": "accurate definition with a wait/blocked picture" },
+          { "criterion": "mutual_exclusion", "marks": 2, "description": "non-sharable resource condition stated" },
+          { "criterion": "hold_and_wait", "marks": 2, "description": "holding while requesting condition stated" },
+          { "criterion": "no_preemption", "marks": 2, "description": "no forced release condition stated" },
+          { "criterion": "circular_wait", "marks": 2, "description": "cycle condition stated" }
+        ]
+      },
+      "partial_credit_rules": [
+        { "criterion": "definition", "fraction": 0.5, "description": "deadlock described but not precisely" }
+      ],
+      "special_rules": "Only a full set of all four conditions earns the circular_wait criterion; partial credit applies to definition."
+    },
+    {
+      "question_id": "Q6",
+      "text": "A store-and-forward network has N switches between sender and receiver, link bandwidth R bps, and a packet length L bits (ignore propagation). Compute the minimum transfer time for one packet.",
+      "max_marks": 5,
+      "question_type": "numerical",
+      "answer_key": {
+        "reference_answers": ["T = (N + 1) * L / R"],
+        "expected_concepts": ["store and forward delay", "per-hop transmission delay", "hop count"],
+        "accepted_alternatives": ["T = L/R per hop", "transmission delay formula"],
+        "keywords": ["N hops", "cumulative delay"],
+        "concept_relationships": [
+          {
+            "source": "per-hop transmission delay",
+            "relationship": "requires",
+            "target": "store and forward delay",
+            "weight": 1.0
+          }
+        ]
+      },
+      "rubric": {
+        "criteria": [
+          { "criterion": "formula", "marks": 2, "description": "correct closed-form expression" },
+          { "criterion": "substitution", "marks": 2, "description": "substitutes N, L, R consistently" },
+          { "criterion": "final_value", "marks": 1, "description": "numeric/simplified final answer" }
+        ]
+      }
+    },
+    {
+      "question_id": "Q7",
+      "text": "Derive the effective throughput of a stop-and-wait sender given propagation delay RTT and frame size L.",
+      "max_marks": 6,
+      "question_type": "mathematical",
+      "answer_key": {
+        "reference_answers": [
+          "Throughput = L / (L/R + RTT) when transmission time of ACK is negligible."
+        ],
+        "expected_concepts": ["transmission time", "round-trip time", "throughput as frames per cycle"],
+        "accepted_alternatives": ["L/(RTT + L/R)", "utilization formula"],
+        "keywords": ["idle waiting", "ACK delay"],
+        "concept_relationships": [
+          {
+            "source": "throughput as frames per cycle",
+            "relationship": "requires",
+            "target": "round-trip time",
+            "weight": 1.0
+          }
+        ]
+      },
+      "rubric": {
+        "criteria": [
+          { "criterion": "setup", "marks": 2, "description": "identifies the per-frame cycle time" },
+          { "criterion": "derivation", "marks": 3, "description": "algebraic derivation is correct" },
+          { "criterion": "conclusion", "marks": 1, "description": "final throughput expression stated" }
+        ]
+      },
+      "special_rules": "Ascribing throughput = L/RTT without derivation earns at most half the derivation marks."
+    },
+    {
+      "question_id": "Q8",
+      "text": "Draw the OSI reference model with all seven layers and annotate one example of encapsulation.",
+      "max_marks": 8,
+      "question_type": "diagram",
+      "answer_key": {
+        "reference_answers": [
+          "Seven layers stacked in order: physical, data link, network, transport, session, presentation, application; a header added at each layer on the way down is encapsulation."
+        ],
+        "expected_concepts": ["seven layer order", "encapsulation", "PDU naming"],
+        "accepted_alternatives": ["OSI stack", "layered model"],
+        "keywords": ["header", "payload", "peer layer"],
+        "concept_relationships": [
+          {
+            "source": "seven layer order",
+            "relationship": "requires",
+            "target": "encapsulation",
+            "weight": 1.0,
+            "description": "the layer stack is only fully credited when headers are shown between adjacent layers"
+          }
+        ]
+      },
+      "rubric": {
+        "criteria": [
+          { "criterion": "layers_list", "marks": 3, "description": "all seven layers present in order" },
+          { "criterion": "encapsulation", "marks": 3, "description": "correct header/encapsulation annotation" },
+          { "criterion": "labeling", "marks": 2, "description": "clear labels and reasonable drawing" }
+        ]
+      }
+    },
+    {
+      "question_id": "Q9",
+      "text": "Compare TCP and UDP on connection setup, reliability, and congestion control using a table.",
+      "max_marks": 6,
+      "question_type": "table",
+      "answer_key": {
+        "reference_answers": [
+          "Q9 table: TCP is connection-oriented, reliable, with congestion control; UDP is connectionless, best-effort, no congestion control."
+        ],
+        "expected_concepts": ["connection-oriented", "reliability", "congestion control", "connectionless"],
+        "accepted_alternatives": ["stream vs datagram"],
+        "keywords": ["three-way handshake", "ACK", "best effort"],
+        "concept_relationships": [
+          {
+            "source": "connection-oriented",
+            "relationship": "implies",
+            "target": "reliability",
+            "weight": 1.0
+          },
+          {
+            "source": "connectionless",
+            "relationship": "alternative",
+            "target": "stream vs datagram",
+            "weight": 0.5,
+            "description": "'datagram' is accepted terminology for connectionless behavior"
+          }
+        ]
+      },
+      "rubric": {
+        "criteria": [
+          { "criterion": "tcp_rows", "marks": 2, "description": "TCP cell entries correct" },
+          { "criterion": "udp_rows", "marks": 2, "description": "UDP cell entries correct" },
+          { "criterion": "accuracy", "marks": 2, "description": "no cross-contamination between columns" }
+        ]
+      }
+    },
+    {
+      "question_id": "Q10",
+      "text": "Write pseudocode for a sliding-window sender that transmits up to W frames before waiting for an ACK. Show the window update step.",
+      "max_marks": 8,
+      "question_type": "programming",
+      "answer_key": {
+        "reference_answers": [
+          "sendable = min(next_frame + W - 1, last_frame); for f in next_frame..sendable: transmit(f); on ACK(n): next_frame = n + 1."
+        ],
+        "expected_concepts": ["window bounds", "ACK advancement", "out-of-order buffering"],
+        "accepted_alternatives": ["Go-Back-N sender loop", "selective repeat window logic"],
+        "keywords": ["cumulative ACK", "pipeline", "W frames"],
+        "concept_relationships": [
+          {
+            "source": "window bounds",
+            "relationship": "requires",
+            "target": "ACK advancement",
+            "weight": 1.0,
+            "description": "the sender loop only terminates when ACKs advance the window"
+          }
+        ]
+      },
+      "rubric": {
+        "criteria": [
+          { "criterion": "loop", "marks": 3, "description": "sender loop transmits within window" },
+          { "criterion": "ack_update", "marks": 3, "description": "window slides on ACK correctly" },
+          { "criterion": "pseudocode", "marks": 2, "description": "clear, executable-by-humans pseudocode" }
+        ]
+      },
+      "special_rules": "A correct but non-executable description earns at most the loop and ack_update criteria."
+    },
+    {
+      "question_id": "Q11",
+      "text": "Mixed: (a) Name the protocol that maps IP to MAC. (b) Give its two message types. (c) State one security weakness.",
+      "max_marks": 5,
+      "question_type": "mixed",
+      "answer_key": {
+        "reference_answers": ["(a) ARP; (b) request and reply; (c) spoofing / cache poisoning."],
+        "expected_concepts": ["ARP", "ARP request", "ARP reply", "spoofing"],
+        "accepted_alternatives": ["address resolution", "ARP cache poisoning"],
+        "keywords": ["MAC broadcast", "cache"],
+        "concept_relationships": [
+          {
+            "source": "ARP",
+            "relationship": "requires",
+            "target": "ARP request",
+            "weight": 1.0
+          }
+        ]
+      },
+      "rubric": {
+        "criteria": [
+          { "criterion": "subpart_a", "marks": 2, "description": "correct protocol identity" },
+          { "criterion": "subpart_b", "marks": 2, "description": "both message types named" },
+          { "criterion": "subpart_c", "marks": 1, "description": "ARP spoofing or equivalent weakness" }
+        ]
+      },
+      "special_rules": "Marks are awarded per sub-part: (a) 2, (b) 2, (c) 1. An answer keyed only to part (a) earns no other marks."
+    }
+  ]
+}
