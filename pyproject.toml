@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aos-v0"
-version = "0.0.5"
+version = "0.0.6"
 description = "A capability-routed, auditable agent execution kernel"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,6 +16,9 @@ dependencies = [
     "openai>=1.0.0",
     "ddgs>=9.0.0",
     "huggingface_hub[inference]>=0.35.0",
+    "Pillow>=10.0.0",
+    "pdfplumber>=0.11.0",
+    "pypdfium2>=4.0.0",
 ]
 
 [project.scripts]
