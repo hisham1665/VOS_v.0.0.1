@@ -40,3 +40,5 @@ AOS_MEMORY: bool = os.environ.get("AOS_MEMORY", "1").lower() in ("1", "true", "y
 MEMORY_MAX_ENTRIES: int = int(os.environ.get("MEMORY_MAX_ENTRIES", "64"))
 MEMORY_MAX_TOTAL_BYTES: int = int(os.environ.get("MEMORY_MAX_TOTAL_BYTES", "512000"))
 MEMORY_MIN_SUBSTANCE_CHARS: int = int(os.environ.get("MEMORY_MIN_SUBSTANCE_CHARS", "200"))
+
+DEFAULT_BUDGET_USD = 0.50

@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from aos_v0.cli import DEFAULT_BUDGET_USD, run
+from aos_v0.config import DEFAULT_BUDGET_USD, run
 from aos_v0.core.artifacts import ArtifactManager
 from aos_v0.core.events import EventBus, OrchestrationEvent
 from aos_v0.core.runtime import RequestContext, Session
