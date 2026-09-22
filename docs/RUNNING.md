@@ -272,6 +272,36 @@ spelling_errors, …) and reports per-resource success/accuracy.
 > still runs. (`reporting`, `review`, `research`, `batch`, … already use
 > package layouts and are warning-free.)
 
+### 3.11 Phase 14 hardening — security, health, provenance, perf, readiness
+
+```bash
+# validate an exam payload before trusting it (structural + path guards),
+# and summarize the append-only access log
+python3 -m aos_v0.exam.security validate examples/sample_exam.json
+python3 -m aos_v0.exam.security logs runs/
+
+# model/storage/review-queue healthcheck (exit 0 = healthy)
+python3 -m aos_v0.exam.health --review-dir runs/review_queue --json
+
+# reproducibility records: exam id/version, answer-key & rubric content
+# versions, traced models, capability DNA, AOS config, timestamp + immutable
+# fingerprint; --verify re-checks identity against today's exam config
+python3 -m aos_v0.exam.provenance examples/sample_exam.json runs/results.jsonl \
+    --out runs/provenance --verify
+
+# graduated-scale performance probe (real batch driver) -> performance_results.csv
+python3 -m aos_v0.exam.perf examples/sample_exam.json --out runs/perf --scales 10,50,100
+
+# executable pre-deployment checklist (exit 0 = ready). Pin --exam-config so
+# the immutability check re-derives provenance fingerprints from the same exam
+python3 -m aos_v0.exam.readiness runs/results.jsonl \
+    --exam-config examples/sample_exam.json --out runs/readiness
+```
+
+RBAC (`exam/security`) is a policy contract the API layer enforces; transport
+auth, student data isolation and secure storage backends stay on the
+deployment/API layer (spec Ph14).
+
 ---
 
 ## 4. End-to-end walkthrough (the happy path)
@@ -319,6 +349,11 @@ python3 -m aos_v0.exam.research examples/sample_exam.json \
 | `review` | `<queue_dir>/review_queue.json` + `<queue_dir>/audit.jsonl` |
 | `reporting` | 3 CSVs, 2 txt reports, `results.json`, per-student `.txt` |
 | `research` | `evaluation_results.csv`, `BENCHMARK_REPORT.md`, `experiment_results/*` |
+| `provenance` | `provenance_<paper>.json` + `provenance_manifest.json` |
+| `perf` | `performance_results.csv` |
+| `readiness` | `READINESS.md` + `readiness.json` |
+| `security logs` | `access.log.jsonl` (append-only) |
+| `health` | health table / JSON (remote resource pool, local adapters) |
 
 All stores are append-only or write-then-rename atomic so a crashed run never
 loses already-recorded work.
@@ -339,5 +374,11 @@ loses already-recorded work.
 - `batch_throughput` synthesizes plain pages, so the measured papers mostly
   route to review; it is a driver-progress measurement, not an OCR accuracy
   claim.
+- `perf` measures the same driver contract at scale (throughput, failure and
+  recovery rates, queue latency). GPU/CPU/VRAM utilization is deployment
+  telemetry and intentionally not reported by the kernel.
+- `readiness` "versions immutable" re-derives provenance fingerprints; give it
+  the exact exam config (or place an `*exam*.json` next to the results) or the
+  check is skipped, not failed.
 - The `aos` kernel CLI requires network/API access for non-local model
   resources; the exam pipeline works fully offline through the local adapters.

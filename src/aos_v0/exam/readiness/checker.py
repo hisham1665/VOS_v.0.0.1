@@ -39,6 +39,7 @@ def verify_production_readiness(
     *,
     checkpoint_dir: Optional[str] = None,
     review_dir: Optional[str] = None,
+    exam_config: Optional[str] = None,
 ) -> ReadinessReport:
     """Run every readiness check against results (and optionally checkpoints)."""
     from aos_v0.exam.reporting.assemble import read_results
@@ -156,13 +157,19 @@ def verify_production_readiness(
         from aos_v0.exam.config import load_exam_configuration
 
         exam = None
-        here = results_path.parent
-        candidates = [p for p in here.glob("*.json") if "exam" in p.name.lower()]
-        if candidates:
+        if exam_config is not None:
             try:
-                exam = load_exam_configuration(str(candidates[0]))
+                exam = load_exam_configuration(exam_config)
             except Exception:  # noqa: BLE001 - best-effort pin check
                 exam = None
+        if exam is None:
+            here = results_path.parent
+            candidates = [p for p in here.glob("*.json") if "exam" in p.name.lower()]
+            if candidates:
+                try:
+                    exam = load_exam_configuration(str(candidates[0]))
+                except Exception:  # noqa: BLE001
+                    exam = None
         for result in results:
             checked += 1
             if exam is not None:
@@ -205,6 +212,7 @@ def readiness_cli_main(argv: Optional[List[str]] = None) -> int:
         description="Run the pre-deployment production-readiness checklist (Phase 14).",
     )
     parser.add_argument("results", help="results.jsonl from a batch run")
+    parser.add_argument("--exam-config", default=None, help="exam config to re-derive identity for the immutability check")
     parser.add_argument("--checkpoint-dir", default=None, help="batch checkpoint dir")
     parser.add_argument("--out", default=None, help="optional output dir (writes READINESS.md/json)")
     parser.add_argument("--json", action="store_true")
@@ -213,6 +221,7 @@ def readiness_cli_main(argv: Optional[List[str]] = None) -> int:
     report = verify_production_readiness(
         args.results,
         checkpoint_dir=args.checkpoint_dir,
+        exam_config=args.exam_config,
     )
     if args.out:
         import os
