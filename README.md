@@ -1,337 +1,187 @@
-# AOS v0.0.2 — Adaptive Cognitive AI Microkernel
+# Medical AOS
 
-**AOS** (Adaptive Cognitive System) is a lightweight agentic framework that decomposes user prompts into **task graphs** — directed acyclic graphs (DAGs) of capability-routed nodes — and executes them concurrently in dependency-respecting waves. The system is designed as a minimal, composable microkernel: each agent role is a single class, each capability is a standalone function, and the pipeline is deterministic and auditable.
+An agentic pipeline that reads a study folder containing medical images —
+X-rays, CT/MR slices, DICOM series — plus PDFs, lab/blood reports, clinical
+notes, CSV/JSON exports, DOCX and XLSX files. It produces one structured
+preliminary report with patient status, findings, source references, and
+recommended next steps for a clinician to verify.
 
----
-
-## Table of Contents
-
-- [Architecture](#architecture)
-- [Pipeline Flow](#pipeline-flow)
-- [Project Structure](#project-structure)
-- [Components](#components)
-  - [Models (`models.py`)](#models-modelspy)
-  - [Manager Agent (`agents/manager_agent.py`)](#manager-agent-agentsmanager_agentpy)
-  - [Graph Executor (`agents/graph_executor.py`)](#graph-executor-agentsgraph_executorpy)
-  - [Sub-Agent (`agents/sub_agent.py`)](#sub-agent-agentssub_agentpy)
-  - [Integrator Agent (`agents/integrator_agent.py`)](#integrator-agent-integrator_agentpy)
-  - [Capabilities](#capabilities)
-  - [Graph Utilities (`graph_utils.py`)](#graph-utilities-graph_utilspy)
-  - [Diagram Utilities (`diagram_utils.py`)](#diagram-utilities-diagram_utilspy)
-- [Data Models](#data-models)
-- [Execution Model: Waves](#execution-model-waves)
-- [Deterministic Diagrams](#deterministic-diagrams)
-- [Semantic Completeness Verification](#semantic-completeness-verification)
-- [Installation & Setup](#installation--setup)
-- [Usage](#usage)
-- [Configuration](#configuration)
-- [Design Decisions](#design-decisions)
-- [Upgrade Path](#upgrade-path)
+> ⚠️ **AI-generated draft for clinician review.** This is decision support
+> only: not a diagnosis, not validated for clinical use, not a regulated
+> device. Every report must be verified by a qualified radiologist before it
+> informs patient care. See [docs/SAFETY.md](docs/SAFETY.md).
 
 ---
 
-## Architecture
+## What it does
 
 ```
-User Prompt
-     │
-     ▼
-┌──────────────────────┐
-│   Manager Agent       │  LLM decomposes prompt → Graph (DAG of Nodes)
-│                      │  Validates structurally + checks semantic completeness
-└──────────────────────┘
-     │
-     ├──► writes outputs/plan.md  (node table + wave breakdown + Mermaid diagram)
-     │
-     ▼
-┌──────────────────────┐
-│   Graph Executor      │  Groups nodes into waves via topological sort
-│                      │  Executes each wave concurrently via ThreadPoolExecutor
-│                      │  Injects vision context into all downstream nodes
-└──────────────────────┘
-     │
-     ▼
-┌──────────────────────┐
-│   Sub-Agent (×N)      │  One instance per node, capability-resolved at runtime
-│                      │  Each calls the appropriate capability function
-└──────────────────────┘
-     │
-     ▼
-┌──────────────────────┐
-│   Integrator Agent    │  Collects sink nodes (nodes with no dependents)
-│                      │  Returns labeled concatenation of their outputs
-└──────────────────────┘
-     │
-     ▼
-   Final Output
+studies/patient-001/          →   a report the referring doctor can act on
+├── chest_pa.dcm                  ├── Patient status: 🟠 HIGH, triage URGENT
+├── chest_lateral.dcm             ├── Findings table with severity + confidence
+├── prior_ct_slice.jpg            ├── Impression
+└── patient.json                  ├── Recommended next steps
+                                  ├── Reference literature
+                                  └── Full provenance: models, timings, failures
 ```
 
-## Pipeline Flow
+Seven stages, run as a parallel task graph:
 
-1. **User input** — a text prompt and optionally an `--image` path.
-2. **Manager Agent** sends the prompt to an LLM (Groq `llama-3.3-70b-versatile`) with a schema-constrained function-calling prompt. The LLM returns a `Graph` object: a list of `Node` objects with `id`, `description`, `capability`, and `depends_on` edges.
-3. **Structural validation** — `validate_graph()` checks for duplicate IDs, dangling references, missing roots, and cycles. Up to 1 retry.
-4. **Semantic completeness check** — a separate LLM call verifies every named entity in the prompt has at least one dedicated node. If incomplete, the graph is regenerated once.
-5. **Plan output** — `outputs/plan.md` is written with a node table, wave breakdown, and a deterministic Mermaid diagram.
-6. **Graph Executor** topologically sorts nodes into waves. Each wave's nodes execute concurrently via threads. Parent outputs are concatenated and passed as input to child nodes.
-7. **Vision context injection** — once the vision node completes, its identification output is injected into every downstream non-vision node's input, ensuring image context is never lost through intermediate summarization.
-8. **Integrator Agent** collects all sink nodes (nodes that no other node depends on) and returns their labeled concatenated outputs.
+1. **Ingest** — walk the folder, decode DICOM (rescale LUT, windowing), strip
+   PHI, resize, cache, and extract bounded pages/chunks from PDF, TXT/MD,
+   CSV/TSV, JSON, DOCX and XLSX. Unreadable files are recorded, never fatal.
+2. **Triage** — a general CLIP gate rejects non-medical images; PubMedCLIP
+   identifies modality (X-ray / CT / MRI / ultrasound / …) and body region.
+   DICOM headers are authoritative; filename hints are a prior CLIP can overrule.
+3. **Screen (cascade stage 1)** — each image is routed, by modality *and*
+   region, to the screener trained for it (chest X-ray → NIH-14 multi-label,
+   head CT → haemorrhage, brain MRI → tumour, limb X-ray → fracture, …).
+   Images no model covers are marked *not screened*, never "normal".
+4. **Confirm (cascade stage 2)** — every stage-1 candidate, and every condition
+   named in the referring question, is re-checked by a disease-specific
+   specialist (pneumonia ×2 incl. TorchXRayVision, TB, stroke, …) → supported /
+   not supported / equivocal / unverifiable.
+5. **Read** — a medical vision-language model reads each image with the
+   cascade evidence (and its limits) in the prompt, while a document agent
+   reads each extracted file/page in parallel.
+6. **Consolidate** — merge duplicate findings across views and documents,
+   reconcile disagreements, and surface specialist-supported candidates the
+   VLM missed.
+7. **Report** — impression, patient status, triage level, next steps, and a
+   per-image screening-cascade table.
 
-## Components
+See [docs/SCREENING_CASCADE.md](docs/SCREENING_CASCADE.md) for the model
+roster, benchmark numbers and — importantly — where it breaks.
 
-### Models (`models.py`)
-
-Two Pydantic models form the type system:
-
-| Model | Fields | Description |
-|-------|--------|-------------|
-| `Node` | `id`, `description`, `capability`, `depends_on`, `input`, `output`, `status`, `performed_by` | A single unit of work. |
-| `Graph` | `job`, `nodes` | A full DAG: the original job + a list of Nodes. |
-
-`capability` must be one of: `web_search`, `summarization`, `vision`.
-
-### Manager Agent (`agents/manager_agent.py`)
-
-The orchestrator. Responsibilities:
-
-1. **Graph generation** — calls Groq's `llama-3.3-70b-versatile` with a system prompt that enforces:
-   - One `web_search` + one `summarization` node per named entity (no collapsing multiple entities into one node).
-   - Parallelism where possible.
-   - Vision node when an image is provided.
-2. **Structural validation** — `validate_graph()` detects cycles, dangling deps, and duplicate IDs. Up to 1 automated retry with the validation error fed back.
-3. **Semantic completeness check** — a secondary LLM call audits whether every named entity in the job has dedicated node(s). Up to 1 retry. Prints `[manager-agent] completeness check: COMPLETE` or `INCOMPLETE` with reason.
-4. **Artifact generation** — writes `outputs/plan.md` with:
-   - Node table (ID, description, capability, dependencies)
-   - Wave breakdown (plain text)
-   - Mermaid diagram (via `diagram_utils.build_mermaid()`)
-5. **README upkeep** — maintains the `## How AOS v0.0.2 plans and executes tasks` section in `README.md`.
-
-**Retry budget:** max 1 structural retry + max 1 completeness retry = max 2 regenerations total.
-
-### Graph Executor (`agents/graph_executor.py`)
-
-Executes the DAG with concurrency:
-
-1. **Wave computation** — calls `build_waves()` for a topological sort producing dependency-respecting waves.
-2. **Concurrent execution** — each wave runs in a `ThreadPoolExecutor` (max_workers = wave size). Nodes within a wave are independent by definition.
-3. **Input routing** — root nodes receive the original `graph.job` (or `image_path` for vision). Non-root nodes receive concatenated, labeled outputs from all parents.
-4. **Vision context injection** — once the vision node produces its output, it is prefixed to the input of every subsequent non-vision node as `[IMAGE IDENTIFICATION]`, ensuring the image description is never lost through intermediate nodes.
-
-### Sub-Agent (`agents/sub_agent.py`)
-
-A thin dispatcher. One instance per node. Maps `node.capability` to the matching function via `CAPABILITY_MAP`:
-
-```python
-CAPABILITY_MAP = {
-    "web_search": web_search.run,
-    "summarization": summarization.run,
-    "vision": vision.run,
-}
-```
-
-Calls `fn(node.input, instruction=node.description)` and stores the result in `node.output`.
-
-### Integrator Agent (`agents/integrator_agent.py`)
-
-Collects sink nodes (nodes that no other node depends on, computed by `get_sink_nodes()`). If there's exactly one sink, returns its output directly. For multiple sinks, returns labeled concatenation.
-
-### Capabilities
-
-#### `capabilities/web_search.py`
-
-Performs real web search via DuckDuckGo, then synthesizes results with Groq:
-
-1. Calls `DDGS().text(query, max_results=5)` to fetch live search results.
-2. Sends those results to Groq's `llama-3.3-70b-versatile` with a prompt that demands exact facts, numbers, and data points.
-3. Returns the synthesized answer.
-
-#### `capabilities/summarization.py`
-
-Summarizes text using Groq's `llama-3.3-70b-versatile`. Prompt preserves all specific facts, statistics, and names — no vague language.
-
-#### `capabilities/vision.py`
-
-Analyzes images using a local Ollama instance with `medgemma1.5:latest`:
-
-1. Validates the image file exists.
-2. Base64-encodes the image.
-3. Sends to Ollama's OpenAI-compatible endpoint at `localhost:11434/v1` with `image_url` content format.
-4. Returns the model's description.
-
-### Graph Utilities (`graph_utils.py`)
-
-Three pure-Python functions:
-
-| Function | Description |
-|----------|-------------|
-| `validate_graph(graph)` | Checks duplicate IDs, dangling references, missing roots, cycles. Raises `GraphValidationError` on failure. |
-| `build_waves(graph)` | Topological sort returning `list[list[Node]]` — one list per wave. |
-| `get_sink_nodes(graph)` | Returns nodes with no dependents. |
-
-### Diagram Utilities (`diagram_utils.py`)
-
-`build_mermaid(graph, waves)` — returns a Mermaid flowchart string deterministically (no LLM calls):
-
-- Groups nodes into `subgraph Wave N` blocks by wave.
-- Labels: `node_id["truncated description (capability)"]`
-- Sanitizes characters that break Mermaid syntax.
-- Renders dependency arrows after all subgraphs.
-- Colors by capability: green (`#4CAF50`) for `web_search`, blue (`#2196F3`) for `summarization`, orange (`#FF9800`) for `vision`.
-
-## Data Models
-
-```
-Node {
-    id: str              # unique identifier (e.g. "a", "b", "search1")
-    description: str     # instruction passed to the capability
-    capability: str      # one of ["web_search", "summarization", "vision"]
-    depends_on: list     # node IDs this node depends on
-    input: str | None    # set at execution time
-    output: str | None   # set after execution
-    status: str          # "pending" | "running" | "done" | "failed"
-    performed_by: str | None  # sub-agent instance name
-}
-
-Graph {
-    job: str             # original user prompt
-    nodes: list[Node]    # the DAG
-}
-```
-
-## Execution Model: Waves
-
-The graph executor uses a **wave-based concurrent execution model**:
-
-1. Root nodes (no dependencies) form **Wave 0** — they run in parallel.
-2. Once all nodes in wave `n` complete, nodes whose dependencies are all satisfied form **Wave n+1**.
-3. Each wave executes with `ThreadPoolExecutor(max_workers=len(wave))`.
-
-**Example:** For the graph `a → c → e` and `b → d → e`:
-- Wave 0: `a`, `b` (parallel)
-- Wave 1: `c`, `d` (parallel)
-- Wave 2: `e`
-
-**Multi-parent merging:** If node `e` depends on `c` and `d`, it receives:
-```
-From node 'c' (description of c):
-[output of c]
-
-From node 'd' (description of d):
-[output of d]
-```
-
-## Deterministic Diagrams
-
-The Mermaid diagrams in `outputs/plan.md` are generated by `diagram_utils.build_mermaid()` — **pure Python string formatting, no LLM calls**. This is a deliberate reliability choice:
-
-- The diagram always faithfully represents the actual graph structure.
-- Wave assignments are computed algorithmically from the dependency edges.
-- Color coding by capability is automatic and consistent.
-- No risk of the LLM inventing, omitting, or misplacing nodes.
-
-## Semantic Completeness Verification
-
-After structural validation passes, the Manager Agent performs an independent LLM audit:
-
-1. Sends the original job text + the generated graph's node list to Groq.
-2. Asks: "Does every entity/subtask named in the job have at least one dedicated node?"
-3. If **COMPLETE** — proceeds.
-4. If **INCOMPLETE: <reason>** — regenerates the graph once with the reason fed back.
-5. If still incomplete after retry, raises `RuntimeError` rather than silently shipping an incomplete plan.
-
-## Installation & Setup
+## Quick start
 
 ```bash
-# 1. Clone and enter the project directory
-cd aos_v0
-
-# 2. Create a virtual environment (recommended)
-python -m venv venv
-.\venv\Scripts\Activate
-
-# 3. Install dependencies
 pip install -r requirements.txt
+cp .env.example .env          # add HF_TOKEN and/or GROQ_API_KEY
 
-# 4. Set up environment variables
-# Create .env with your Groq API key:
-# GROQ_API_KEY=gsk_...
-
-# 5. Install and start Ollama (for vision capability)
-# Download from https://ollama.com
-ollama pull medgemma1.5:latest
-ollama serve
-
-# 6. (Optional) Set Ollama parallel execution
-# Higher values allow more concurrent local model requests
-set OLLAMA_NUM_PARALLEL=3
+python main.py --doctor       # check models, credentials, dependencies
+python main.py --study ./studies/patient-001 \
+               --history "54M, 3 days cough and fever" \
+               --question "rule out pneumonia"
 ```
 
-## Usage
+Reports are written to `outputs/reports/` as markdown and JSON, and a summary
+prints to the terminal.
 
-```bash
-# Basic prompt (text only)
-python main.py "Research electric vehicles and summarize the key trends"
+### CLI
 
-# Prompt with image
-python main.py "Identify this team and compare them with Brazil, Portugal, Spain" --image image.jpg
+| Flag | Purpose |
+|---|---|
+| `--study PATH` | Folder of images, or a single image/DICOM file |
+| `--history TEXT` | Clinical history — substantially improves the read |
+| `--question TEXT` | The referring clinician's specific question |
+| `--no-literature` | Skip the literature stage (faster, no network search) |
+| `--json` | Print the full report as JSON |
+| `--out DIR` | Where to write the report |
+| `--doctor` | Environment preflight, then exit |
+| `--clear-cache` | Drop cached images and model outputs |
+| `--ask PROMPT` | Free-form job through the LLM planner instead of the fixed plan |
+| `--verbose` | Per-stage timing logs |
 
-# Interactive mode (no args)
-python main.py
-Enter your prompt: what are the latest NBA playoff results
+Exit codes: `0` normal, `3` triage is **immediate**, `1` error. Alert on `3`.
+
+### Study folder layout
+
+Anything readable works. A `patient.json` sidecar adds context:
+
+```json
+{
+  "age": "54",
+  "sex": "M",
+  "clinical_history": "3 days cough and fever, no travel",
+  "referring_question": "rule out pneumonia"
+}
 ```
 
-The output is written to `outputs/plan.md` and the final result is printed to the console.
+PDFs, text/tabular files and office documents are extracted into bounded,
+source-attributed pages. `patient.json` fills patient context; JSON with extra
+clinical fields is also analyzed as a document. Duplicate inputs are detected
+by content hash. Set `MAOS_MAX_IMAGES` to a positive value to sample large
+series; `0` (the default) reads all image files.
 
 ## Configuration
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `GROQ_API_KEY` | Yes | — | Groq Cloud API key (for manager, web_search synthesis, summarization) |
-| Ollama | For vision | `localhost:11434` | Local vision model via OpenAI-compatible API |
-| `OLLAMA_NUM_PARALLEL` | No | `1` | Concurrent Ollama request limit |
+Everything is an environment variable; see [.env.example](.env.example) for the
+full list. The defaults target a small laptop GPU.
 
-**Project dependencies** (`requirements.txt`):
+```bash
+HF_TOKEN=hf_...              # hosted model inference
+GROQ_API_KEY=gsk_...         # fast text synthesis (optional; HF is the fallback)
 
-- `pydantic>=2.0` — data modeling
-- `groq>=0.13.0` — Groq Cloud API client
-- `openai>=1.0.0` — OpenAI-compatible API (used for Ollama vision)
-- `ddgs>=9.0.0` — DuckDuckGo web search
-- `python-dotenv>=1.0.0` — environment variable loading
-- `requests>=2.31.0` — HTTP utilities
+MAOS_VLM_BACKEND=ollama      # keep images on-premise
+MAOS_MAX_WORKERS=8           # concurrent nodes
+MAOS_MAX_GPU_WORKERS=1       # concurrent local GPU calls
+MAOS_MAX_IMAGES=0            # 0 = all images; positive value enables sampling
+MAOS_MAX_FILE_MB=100         # per-input safety budget
+MAOS_MAX_DOCUMENT_PAGES=200  # PDF/page/chunk extraction budget
+MAOS_DOCUMENT_CHUNK_CHARS=8000
+```
 
-## Design Decisions
+## Library use
 
-| Decision | Rationale |
-|----------|-----------|
-| **Sub-Agent is generic, one class per capability** | The dispatcher pattern (`CAPABILITY_MAP`) allows adding new capabilities without touching agent code. |
-| **Capabilities are standalone functions, not classes** | Simplifies testing in isolation. Each capability can be imported and run independently with a hardcoded string. |
-| **Wave-based concurrent execution** | Topological sort guarantees correctness; ThreadPoolExecutor keeps it simple. No event loops, no actor frameworks. |
-| **LLM generates the graph, code validates it** | The LLM is used for decomposition (where reasoning matters). Structural validation and diagram generation are deterministic. |
-| **One web_search + one summarization per entity** | Prevents the LLM from collapsing distinct entities into a single vague node. A predictable 1-to-1 search-to-summarize ratio. |
-| **Vision context injection** | Downstream nodes always receive the vision output as explicit context, preventing loss through intermediate summarization. |
-| **Separate structural + semantic validation** | Structural: code checks cycles/dangling refs. Semantic: LLM audits entity coverage. Different concerns, different retry budgets. |
-| **Mermaid diagram is deterministic, not LLM-generated** | Eliminates the risk of hallucinated nodes, missing edges, or syntax errors in the diagram. |
+```python
+from pipeline import analyze_study
 
-## Project Structure
+report, study, graph = analyze_study(
+    "./studies/patient-001",
+    clinical_history="54M, cough and fever",
+    referring_question="rule out pneumonia",
+)
+
+print(report.status.overall_severity)   # Severity.HIGH
+print(report.status.triage)             # "urgent"
+for finding in report.findings:
+    print(finding.label, finding.severity, finding.confidence)
+
+report.to_json()                        # everything, serialised
+```
+
+Every stage is separately callable — `load_study`, `build_radiology_plan`,
+`GraphExecutor().run`, `IntegratorAgent().integrate`, `write_report` — so a
+service can cache ingest, or a test can drive the executor with a hand-built
+graph.
+
+## Where things live
 
 ```
-aos_v0/
-├── main.py                    # Entry point
-├── models.py                  # Node, Graph (Pydantic)
-├── graph_utils.py             # validate_graph(), build_waves(), get_sink_nodes()
-├── diagram_utils.py           # build_mermaid() — deterministic diagram generation
-├── config.py                  # Environment variable loading
-├── requirements.txt           # Dependencies
-├── .env                       # Environment variables (GROQ_API_KEY)
-├── agents/
-│   ├── manager_agent.py       # LLM decomposition + validation + plan output
-│   ├── sub_agent.py           # Capability dispatcher
-│   ├── graph_executor.py      # Wave-based concurrent execution
-│   └── integrator_agent.py    # Sink node collection + output
-├── capabilities/
-│   ├── web_search.py          # DuckDuckGo search + Groq synthesis
-│   ├── summarization.py       # Groq-based text summarization
-│   └── vision.py              # Ollama/MedGemma image analysis
-└── outputs/
-    └── plan.md                # Generated task plan (node table + Mermaid)
+main.py              CLI                  pipeline.py    stage sequencing
+models.py            every type           config.py      all settings
+ingest/              folder → Study       agents/        orchestration
+capabilities/        the only layer that calls models
+reporting/           report → markdown + JSON
+core/                errors, logging, retry, cache
+tests/               offline tests, no network, no weights
 ```
+
+## Tests
+
+```bash
+python -m pytest tests/ -q     # offline suite; no credentials or model weights needed
+```
+
+Every model call is stubbed, so the suite needs no credentials, no network and
+no weights. It covers graph validation, DICOM decoding and PHI stripping,
+failure containment, timeout handling, the concurrency ceiling, artifact
+propagation, and the safety invariant that severity is never downgraded below
+the worst finding.
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Layers, data flow, why the plan is code and not a prompt |
+| [FAILURE_MODES.md](docs/FAILURE_MODES.md) | All 23 failure points found and fixed, plus remaining limitations |
+| [MODELS.md](docs/MODELS.md) | The model roster, routing, swapping checkpoints |
+| [PERFORMANCE.md](docs/PERFORMANCE.md) | Where time goes, measured optimisations, tuning by hardware |
+| [SAFETY.md](docs/SAFETY.md) | Clinical safeguards, privacy, deployment checklist |
+
+## Requirements
+
+Python 3.10+. A GPU is optional — small models fall back to CPU, large ones to
+hosted inference. `pydicom` is optional but required for `.dcm` files;
+`python main.py --doctor` reports exactly what is missing and how to install it.

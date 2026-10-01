@@ -1,60 +1,74 @@
+"""Planning agent: LLM decomposition for open-ended jobs, plus plan rendering.
+
+For a study read, :mod:`agents.planner` builds the DAG in code -- faster and
+auditable. This agent handles the other case: a free-form job whose shape is
+genuinely unknown ("compare these two imaging guidelines and the study").
+
+Three things changed from the original implementation:
+
+* The planner may only emit **registered** capability names, checked against
+  the registry rather than a hard-coded list that drifted out of sync.
+* Repair is incremental. A rejected graph is sent back with the specific error
+  and *one* retry, instead of regenerating from scratch in two nested loops.
+* The completeness audit is **off by default** (``MAOS_COMPLETENESS_CHECK=1``
+  re-enables it). It cost a full extra LLM round trip on every run.
+
+It no longer rewrites ``README.md``: generated content overwriting hand-written
+documentation was a data-loss bug, not a feature.
+"""
+
+from __future__ import annotations
+
 import json
 from pathlib import Path
 from typing import Optional
 
-from groq import Groq
+from capabilities import registry
+from capabilities.hf_backend import chat_text, groq_client
+from config import MODELS, RUNTIME
+from core.errors import PlanningError
+from core.logging_utils import get_logger
+from core.retry import with_retry
+from diagram_utils import build_mermaid
+from graph_utils import GraphValidationError, build_waves, validate_graph
+from models import Graph, Study
 
-from aos_v0.config import GROQ_API_KEY
-from aos_v0.graph_utils import validate_graph, build_waves, GraphValidationError
-from aos_v0.diagram_utils import build_mermaid
-from aos_v0.models import Graph
+_log = get_logger("manager")
 
-_CAPABILITIES = ["web_search", "summarization", "vision"]
 
-_MODEL = "llama-3.3-70b-versatile"
+def _system_prompt() -> str:
+    """Built at call time so it always reflects the live capability registry."""
+    capability_lines = "\n".join(
+        f"- {name}: {description}" for name, description in sorted(registry.describe().items())
+    )
+    return f"""\
+You are a task planner for a medical imaging analysis system. Decompose the \
+user's job into a directed acyclic graph (DAG) of tasks.
 
-_SYSTEM_PROMPT = f"""\
-You are a task planner. Given a user job, decompose it into a directed acyclic \
-graph (DAG) of tasks.
+Available capabilities -- you may use ONLY these names:
+{capability_lines}
 
 Each node must have:
-- id: a short lowercase letter or string identifier (e.g. "a", "b", "search1")
-- description: a SPECIFIC, ACTIONABLE instruction for the node's capability. \
-Not vague — this text IS the instruction passed to the capability. E.g. \
-"Search for recent advances in solar panel efficiency" not "do research".
-- capability: EXACTLY ONE from this fixed list: {_CAPABILITIES}
-- depends_on: a list of node ids this node depends on. Empty list [] means \
-root node (no dependencies).
+- id: a short identifier, e.g. "read1", "merge"
+- description: a specific, actionable instruction. This text is passed
+  verbatim to the capability as its instruction, so it must stand alone.
+- capability: EXACTLY one name from the list above.
+- depends_on: list of node ids it waits for. [] means it is a root node.
 
-PARALLELISM: When two or more nodes do not depend on each other, they can run \
-in parallel. You SHOULD use multiple parallel branches when the task naturally \
-splits (e.g. researching two different topics at the same time).
+PARALLELISM: nodes that do not depend on each other run concurrently. Split
+independent work into separate nodes so it runs in parallel.
 
-MERGING: A node can depend on MULTIPLE parents. Its input will be the \
-concatenated outputs of all parent nodes. Use this for nodes that need to \
-combine or compare results from parallel branches.
+MERGING: a node may depend on several parents and receives all their outputs.
 
-CRITICAL — ONE NODE PER NAMED ENTITY: When the job names multiple distinct \
-entities that each need individual research, analysis, or comparison (e.g. a \
-list of teams, products, companies, people, places), create ONE web_search node \
-AND ONE summarization node PER NAMED ENTITY — never combine multiple named \
-entities into a single node. Only merge individual entity results together at a \
-later, separate comparison/aggregation node that depends on all of them.
+IMAGE WORK: capabilities {sorted(registry.IMAGE_CAPABILITIES)} operate on the
+study's images. Give each image its own node when the images should be read
+independently; the system assigns images to those nodes.
 
-Example: if the job is "analyze Brazil, Portugal, and Spain", produce:
-  - 3 web_search nodes (one for Brazil, one for Portugal, one for Spain)
-  - 3 summarization nodes (one per team, each depending on its own web_search)
-  - optionally 1 comparison node depending on all 3 summarization nodes
-NOT a single node covering all three teams.
+ORDERING RULE: a report_synthesis node must be the single final node, and must
+depend on whatever produced the findings.
 
-If an image_path is provided in the job, include a root "vision" node that \
-describes the image, feeding into downstream nodes. If no image is mentioned, \
-do NOT include a vision node.
+Call the create_graph function. Do not reply with plain text."""
 
-The id for each node must be a simple string like "a", "b", "c", etc.
-
-You MUST call the create_graph function with the decomposed graph. Do not \
-respond with plain text."""
 
 _CREATE_GRAPH_TOOL = {
     "type": "function",
@@ -64,10 +78,7 @@ _CREATE_GRAPH_TOOL = {
         "parameters": {
             "type": "object",
             "properties": {
-                "job": {
-                    "type": "string",
-                    "description": "The original user job.",
-                },
+                "job": {"type": "string", "description": "The original user job."},
                 "nodes": {
                     "type": "array",
                     "items": {
@@ -76,10 +87,7 @@ _CREATE_GRAPH_TOOL = {
                             "id": {"type": "string"},
                             "description": {"type": "string"},
                             "capability": {"type": "string"},
-                            "depends_on": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                            },
+                            "depends_on": {"type": "array", "items": {"type": "string"}},
                         },
                         "required": ["id", "description", "capability", "depends_on"],
                     },
@@ -90,322 +98,174 @@ _CREATE_GRAPH_TOOL = {
     },
 }
 
-_README_SECTION = """\
-## How AOS v0.0.2 plans and executes tasks
-
-AOS decomposes a user job into a **task graph** — a directed acyclic graph
-(DAG) of **nodes** connected by **edges**.
-
-- **Node:** a single unit of work. Each node has a unique `id`, a `description`
-  (which doubles as the instruction passed to its capability), a `capability`
-  (the tool it calls, e.g. `web_search`, `summarization`, or `vision`), and a
-  `depends_on` list of node ids it must wait for.
-- **Edge:** a dependency from one node to another. If node C has
-  `depends_on: ["a", "b"]`, it runs only after both A and B finish, and
-  receives their outputs as input.
-
-**Concurrency:** nodes in the same dependency "wave" are independent and run
-concurrently via threads. For example, in the graph below, nodes `a` and `b`
-run in parallel, then `c` and `d` run in parallel, and finally `e` runs.
-
-**Multi-parent merging:** a node with multiple parents receives the labeled,
-concatenated outputs of all its parents, so it can compare, combine, or
-reconcile them.
-
-**Diagrams:** the Mermaid diagrams in `outputs/plan.md` are generated
-deterministically from the validated graph by `diagram_utils.build_mermaid()`,
-not by the LLM. This is a deliberate reliability choice — the diagram always
-faithfully represents the actual graph structure, wave assignments, and
-capability types, with no risk of the LLM inventing or omitting nodes.
-
-```mermaid
-flowchart TD
-    subgraph Wave 0
-        a["Research solar energy (web_search)"]
-        b["Research wind energy (web_search)"]
-    end
-    subgraph Wave 1
-        c["Summarize solar (summarization)"]
-        d["Summarize wind (summarization)"]
-    end
-    subgraph Wave 2
-        e["Compare summaries (summarization)"]
-    end
-    a --> c
-    b --> d
-    c --> e
-    d --> e
-
-    classDef web_searchStyle fill:#4CAF50,color:#fff
-    classDef summarizationStyle fill:#2196F3,color:#fff
-    class a web_searchStyle
-    class b web_searchStyle
-    class c summarizationStyle
-    class d summarizationStyle
-    class e summarizationStyle
-```
-"""
-
 
 class ManagerAgent:
-    _MAX_STRUCTURAL_RETRIES = 1
-    _MAX_COMPLETENESS_RETRIES = 1
+    """Builds a task graph from a free-form job, and renders plans to disk."""
 
-    def __init__(self):
-        self._client = Groq(api_key=GROQ_API_KEY)
+    MAX_REPAIRS = 1
 
-    def create_plan(self, user_prompt: str, image_path: Optional[str] = None) -> Graph:
-        print("[manager-agent] decomposing job into a task graph...")
+    def create_plan(self, user_prompt: str, study: Optional[Study] = None) -> Graph:
+        _log.info("decomposing job into a task graph")
 
-        graph = self._call_llm(user_prompt, image_path)
+        messages = self._build_messages(user_prompt, study)
+        graph = self._call_planner(messages)
 
-        # --- structural validation loop ---
-        structural_attempts = 0
-        while True:
-            try:
-                validate_graph(graph)
+        # --- repair loop: structure first, then capability names ----------
+        for attempt in range(self.MAX_REPAIRS + 1):
+            problems = self._problems(graph)
+            if not problems:
                 break
-            except GraphValidationError as exc:
-                structural_attempts += 1
-                if structural_attempts > self._MAX_STRUCTURAL_RETRIES:
-                    raise RuntimeError(
-                        f"Graph still invalid after {self._MAX_STRUCTURAL_RETRIES} "
-                        f"structural retry: {exc}"
-                    ) from exc
-                print(f"[manager-agent] structural validation failed, retrying ({structural_attempts}/{self._MAX_STRUCTURAL_RETRIES}): {exc}")
-                graph = self._call_llm_with_retry(user_prompt, image_path, str(exc))
-
-        # --- semantic completeness check ---
-        completeness_attempts = 0
-        while True:
-            verdict = self._check_completeness(user_prompt, graph)
-            if verdict == "COMPLETE":
-                print("[manager-agent] completeness check: COMPLETE")
-                break
-            completeness_attempts += 1
-            if completeness_attempts > self._MAX_COMPLETENESS_RETRIES:
-                raise RuntimeError(
-                    f"Graph still incomplete after {self._MAX_COMPLETENESS_RETRIES} "
-                    f"completeness retry: {verdict}"
+            if attempt == self.MAX_REPAIRS:
+                raise PlanningError(
+                    "Planner could not produce a valid graph after "
+                    f"{self.MAX_REPAIRS} repair attempt(s): {problems}"
                 )
-            print(f"[manager-agent] completeness check: INCOMPLETE ({verdict}) — regenerating")
-            graph = self._call_llm_with_completeness_retry(
-                user_prompt, image_path, verdict
-            )
-            # re-validate structurally after completeness regeneration
-            try:
-                validate_graph(graph)
-            except GraphValidationError as exc:
-                print(f"[manager-agent] structural validation failed after completeness retry: {exc}")
-                graph = self._call_llm_with_retry(user_prompt, image_path, str(exc))
-                validate_graph(graph)
+            _log.warning("plan rejected (%s); requesting a repair", problems)
+            repair = list(messages) + [
+                {
+                    "role": "assistant",
+                    "content": f"Proposed graph: {graph.model_dump_json()}",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"That graph is invalid: {problems}\n\n"
+                        "Fix exactly these problems, keep everything else, and "
+                        "call create_graph again."
+                    ),
+                },
+            ]
+            graph = self._call_planner(repair)
 
-        self._write_plan_md(graph)
-        self._ensure_readme()
+        if RUNTIME.planner_completeness_check:
+            verdict = self._check_completeness(user_prompt, graph)
+            if verdict != "COMPLETE":
+                _log.warning("completeness audit: %s -- continuing anyway", verdict)
 
         waves = build_waves(graph)
-        print(
-            "[manager-agent] graph written to outputs/plan.md "
-            f"({len(graph.nodes)} nodes, {len(waves)} waves)"
-        )
+        _log.info("plan ready: %d node(s), %d wave(s)", len(graph.nodes), len(waves))
         return graph
 
-    def _call_llm(self, user_prompt: str, image_path: Optional[str] = None) -> Graph:
-        messages = self._build_messages(user_prompt, image_path)
-        response = self._client.chat.completions.create(
-            model=_MODEL,
-            messages=messages,
-            tools=[_CREATE_GRAPH_TOOL],
-            tool_choice={"type": "function", "function": {"name": "create_graph"}},
-            temperature=0.2,
-        )
-        return Graph.model_validate(self._extract_fn_call(response))
+    # ------------------------------------------------------------------
+    def _problems(self, graph: Graph) -> str:
+        """Return a human-readable problem string, or "" when the graph is fine."""
+        issues: list[str] = []
+        try:
+            validate_graph(graph)
+        except GraphValidationError as exc:
+            issues.append(str(exc))
 
-    def _call_llm_with_retry(
-        self, user_prompt: str, image_path: Optional[str], error_msg: str
-    ) -> Graph:
-        messages = self._build_messages(user_prompt, image_path)
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "Your previous graph failed validation:\n"
-                    f"{error_msg}\n\n"
-                    "Please fix the errors and call create_graph again."
-                ),
-            }
+        unknown = sorted(
+            {n.capability for n in graph.nodes if not registry.is_registered(n.capability)}
         )
-        response = self._client.chat.completions.create(
-            model=_MODEL,
-            messages=messages,
-            tools=[_CREATE_GRAPH_TOOL],
-            tool_choice={"type": "function", "function": {"name": "create_graph"}},
-            temperature=0.2,
+        if unknown:
+            issues.append(
+                f"unknown capabilities {unknown}; valid names are {registry.names()}"
+            )
+        return "; ".join(issues)
+
+    def _call_planner(self, messages: list) -> Graph:
+        def _call() -> dict:
+            response = groq_client().chat.completions.create(
+                model=MODELS.text_llm,
+                messages=messages,
+                tools=[_CREATE_GRAPH_TOOL],
+                tool_choice={"type": "function", "function": {"name": "create_graph"}},
+                temperature=0.2,
+            )
+            message = response.choices[0].message
+            if not message.tool_calls:
+                raise PlanningError(
+                    "planner did not call create_graph; "
+                    f"it replied: {(message.content or '')[:300]}"
+                )
+            return json.loads(message.tool_calls[0].function.arguments)
+
+        payload = with_retry(
+            _call,
+            attempts=RUNTIME.max_retries,
+            base_delay=RUNTIME.retry_base_delay,
+            label="planner",
         )
-        return Graph.model_validate(self._extract_fn_call(response))
+        return Graph.model_validate(payload)
+
+    def _build_messages(self, user_prompt: str, study: Optional[Study]) -> list:
+        text = user_prompt
+        if study is not None:
+            summary = "\n".join(
+                f"- {img.image_id}: {img.modality.value}"
+                f"{', ' + img.body_part if img.body_part else ''}"
+                for img in study.images[:20]
+            )
+            text = (
+                f"{user_prompt}\n\n"
+                f"The study contains {len(study.images)} image(s):\n{summary}"
+            )
+        return [
+            {"role": "system", "content": _system_prompt()},
+            {"role": "user", "content": text},
+        ]
 
     def _check_completeness(self, user_prompt: str, graph: Graph) -> str:
+        """Optional audit: does every entity named in the job have a node?"""
         node_list = "\n".join(
-            f"  - id={n.id}, description={n.description!r}, "
-            f"capability={n.capability}, depends_on={n.depends_on}"
+            f"  - {n.id}: {n.description!r} [{n.capability}] <- {n.depends_on}"
             for n in graph.nodes
         )
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a completeness auditor. Given a user job and a "
-                    "proposed task graph, check whether every distinct entity "
-                    "or subtask explicitly named in the job is COVERED by at "
-                    "least one node in the graph.\n\n"
-                    "COVERAGE RULES (apply these strictly):\n"
-                    "- A vision node for an image = the image is covered.\n"
-                    "- A web_search node mentioning an entity = that entity "
-                    "is researched/analyzed.\n"
-                    "- A summarization node for an entity = that entity is "
-                    "summarized/analyzed.\n"
-                    "- Any node whose description mentions an entity covers "
-                    "that entity, regardless of capability type.\n"
-                    "- A chain like vision -> web_search -> summarization for "
-                    "an entity = fully covered.\n\n"
-                    "Only respond INCOMPLETE if an entity or subtask named in "
-                    "the job has ZERO nodes mentioning it. Do NOT require "
-                    "extra 'analysis', 'deep dive', or 'dedicated analysis' "
-                    "nodes beyond what already exists.\n\n"
-                    "Respond with EXACTLY one of:\n"
-                    "- COMPLETE\n"
-                    "- INCOMPLETE: <short reason>\n\n"
-                    "One line only."
+        try:
+            verdict, _ = chat_text(
+                f"JOB: {user_prompt}\n\nGRAPH NODES:\n{node_list}",
+                system=(
+                    "You audit task graphs for coverage. Answer with exactly "
+                    "'COMPLETE' or 'INCOMPLETE: <short reason>'. A node whose "
+                    "description mentions an entity covers that entity. Only say "
+                    "INCOMPLETE when something named in the job has no node at all."
                 ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"JOB: {user_prompt}\n\n"
-                    f"GRAPH NODES:\n{node_list}"
-                ),
-            },
-        ]
-        response = self._client.chat.completions.create(
-            model=_MODEL,
-            messages=messages,
-            temperature=0.0,
-            max_tokens=200,
-        )
-        text = (response.choices[0].message.content or "").strip()
-        if text.upper().startswith("COMPLETE"):
+                max_tokens=120,
+                temperature=0.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - the audit is advisory
+            _log.warning("completeness audit unavailable: %s", exc)
             return "COMPLETE"
-        return text
+        return "COMPLETE" if verdict.strip().upper().startswith("COMPLETE") else verdict
 
-    def _call_llm_with_completeness_retry(
-        self, user_prompt: str, image_path: Optional[str], reason: str
-    ) -> Graph:
-        messages = self._build_messages(user_prompt, image_path)
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "Your previous graph was flagged as incomplete:\n"
-                    f"{reason}\n\n"
-                    "Please regenerate the graph ensuring every distinct entity "
-                    "or subtask named in the job has its own dedicated node(s). "
-                    "Do NOT combine multiple named entities into a single node. "
-                    "Call create_graph with the corrected graph."
-                ),
-            }
-        )
-        response = self._client.chat.completions.create(
-            model=_MODEL,
-            messages=messages,
-            tools=[_CREATE_GRAPH_TOOL],
-            tool_choice={"type": "function", "function": {"name": "create_graph"}},
-            temperature=0.2,
-        )
-        return Graph.model_validate(self._extract_fn_call(response))
-
+    # ------------------------------------------------------------------
     @staticmethod
-    def _build_messages(
-        user_prompt: str, image_path: Optional[str] = None
-    ) -> list:
-        messages: list = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-        ]
-
-        text = user_prompt
-        if image_path:
-            from pathlib import Path as _P
-
-            if not _P(image_path).exists():
-                raise FileNotFoundError(f"Image not found: {image_path}")
-            text = f"{user_prompt}\n\n[User has provided an image at: {image_path}]"
-
-        messages.append({"role": "user", "content": text})
-
-        return messages
-
-    @staticmethod
-    def _extract_fn_call(response) -> dict:
-        message = response.choices[0].message
-        if message.tool_calls:
-            tool_call = message.tool_calls[0]
-            return json.loads(tool_call.function.arguments)
-        raise RuntimeError(
-            "LLM did not return a create_graph function call. "
-            f"Content: {message.content}"
-        )
-
-    @staticmethod
-    def _write_plan_md(graph: Graph) -> None:
+    def write_plan(graph: Graph, path: Path | str) -> Path:
+        """Render the graph to markdown with a deterministic Mermaid diagram."""
         waves = build_waves(graph)
 
-        # --- node table ---
         lines = [
             "# Task Plan",
+            "",
             f"**Job:** {graph.job}",
             "",
-            "| # | Node ID | Description | Capability | Depends On |",
-            "|---|---------|-------------|------------|------------|",
+            f"**Shape:** {len(graph.nodes)} nodes across {len(waves)} waves",
+            "",
+            "| Node | Description | Capability | Depends on | Status | Time |",
+            "|---|---|---|---|---|---|",
         ]
         for node in graph.nodes:
-            deps = ", ".join(node.depends_on) if node.depends_on else "-"
+            deps = ", ".join(f"`{d}`" for d in node.depends_on) if node.depends_on else "-"
+            duration = f"{node.duration_s:.2f}s" if node.duration_s else "-"
             lines.append(
-                f"| {node.id} | {node.id} | {node.description} "
-                f"| {node.capability} | {deps} |"
+                f"| `{node.id}` | {node.description} | {node.capability} "
+                f"| {deps} | {node.status} | {duration} |"
             )
 
-        # --- wave breakdown ---
-        wave_parts = []
-        for wave_idx, wave in enumerate(waves):
-            ids = ", ".join(n.id for n in wave)
-            wave_parts.append(f"Wave {wave_idx}: {ids}")
-        lines += [
-            "",
-            "**Waves:** " + " | ".join(wave_parts),
-            "",
-        ]
+        lines += ["", "## Execution waves", ""]
+        for index, wave in enumerate(waves):
+            ids = ", ".join(f"`{n.id}`" for n in wave)
+            lines.append(f"- **Wave {index}** ({len(wave)} in parallel): {ids}")
 
-        # --- mermaid diagram (deterministic, not LLM-generated) ---
-        mermaid = build_mermaid(graph, waves)
-        lines += [
-            "```mermaid",
-            mermaid,
-            "```",
-        ]
+        failures = [n for n in graph.nodes if n.status == "failed"]
+        if failures:
+            lines += ["", "## Failures", ""]
+            lines.extend(f"- `{n.id}` ({n.capability}): {n.error}" for n in failures)
 
-        path = Path(__file__).resolve().parent.parent / "outputs" / "plan.md"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        lines += ["", "## Graph", "", "```mermaid", build_mermaid(graph, waves), "```", ""]
 
-    @staticmethod
-    def _ensure_readme() -> None:
-        path = Path(__file__).resolve().parent.parent / "README.md"
-        existing = path.read_text(encoding="utf-8") if path.exists() else ""
-        marker = "## How AOS v0.0.2 plans and executes tasks"
-        if marker in existing:
-            start = existing.index(marker)
-            content = existing[:start].rstrip("\n") + "\n\n" + _README_SECTION
-        elif existing:
-            content = existing.rstrip("\n") + "\n\n" + _README_SECTION
-        else:
-            content = _README_SECTION
-        path.write_text(content, encoding="utf-8")
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(lines), encoding="utf-8")
+        return target

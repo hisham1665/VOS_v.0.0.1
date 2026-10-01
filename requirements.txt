@@ -1,6 +1,31 @@
+# --- core ---------------------------------------------------------------
 pydantic>=2.0,<3.0
-requests>=2.31.0,<3.0
 python-dotenv>=1.0.0,<2.0
-groq>=0.13.0
-openai>=1.0.0
+requests>=2.31.0,<3.0
+Pillow>=10.0.0
+numpy>=1.24
+
+# --- Hugging Face -------------------------------------------------------
+huggingface_hub>=0.25.0        # hosted Inference API client
+transformers>=4.45.0           # local classifier / CLIP / VLM pipelines
+torch>=2.0                     # install the CUDA build separately for GPU
+# torchvision must match the installed torch build. For CUDA 12.4:
+#   pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+# Install it *before* torchxrayvision, or pip may replace CUDA torch with a CPU build.
+torchvision>=0.15
+torchxrayvision>=1.5           # chest X-ray specialist (18 labels, incl. pneumothorax)
+
+# --- medical imaging ----------------------------------------------------
+pydicom>=2.4.0                 # .dcm parsing
+pylibjpeg>=2.0                 # compressed DICOM transfer syntaxes
+pylibjpeg-libjpeg>=2.0
+pypdfium2>=4.30                 # native PDF text extraction + page rendering
+python-docx>=1.1                # DOCX paragraph/table extraction
+openpyxl>=3.1                   # XLSX read-only extraction
+
+# --- hosted text models (optional but recommended) ----------------------
+groq>=0.13.0                   # fast planning / synthesis LLM
+openai>=1.0.0                  # OpenAI-compatible clients, incl. Ollama
+
+# --- literature lookup --------------------------------------------------
 ddgs>=9.0.0

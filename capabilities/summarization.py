@@ -1,32 +1,71 @@
-from typing import Optional
+"""Condense upstream text without losing clinical specifics.
 
-from groq import Groq
+The failure mode this guards against is a summariser that turns "4cm right
+lower lobe consolidation" into "an abnormality was noted". Numbers, laterality
+and measurements are exactly what the referring clinician acts on, so the
+prompt forbids softening them.
+"""
 
-from aos_v0.config import GROQ_API_KEY
+from __future__ import annotations
 
-_client = Groq(api_key=GROQ_API_KEY)
+from core.errors import CapabilityError
+from core.logging_utils import get_logger
+from capabilities.hf_backend import chat_text, record_model
+from capabilities.registry import CapabilityRequest, CapabilityResult, register
 
-_MODEL = "llama-3.3-70b-versatile"
+_log = get_logger("summarize")
 
-_DEFAULT_SYSTEM = (
-    "You are a factual summarizer. Given a body of text, extract and "
-    "preserve ALL specific facts, numbers, dates, statistics, and names. "
-    "Produce a detailed summary that keeps every concrete data point. "
-    "Never use vague language like 'multiple', 'not specified', or 'various' "
-    "when exact numbers are available in the source text. "
-    "Return only the summary text with no preamble."
+_SYSTEM = (
+    "You are a clinical summarizer. Preserve every specific fact: measurements, "
+    "laterality (left/right), counts, dates, anatomical locations, probabilities "
+    "and named conditions. Never replace a specific value with a vague word such "
+    "as 'several', 'various' or 'not specified' when the source states it. "
+    "Never add a fact the source does not contain. "
+    "Return only the summary, with no preamble."
 )
 
+# Text below this length is already a summary; another model call would only
+# add latency and a chance to lose detail.
+_PASSTHROUGH_CHARS = 600
 
-def run(text: str, instruction: Optional[str] = None) -> str:
-    system = instruction if instruction else _DEFAULT_SYSTEM
-    response = _client.chat.completions.create(
-        model=_MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": text},
-        ],
-        temperature=0.3,
-        max_tokens=1024,
+# Hard cap on what we send, to keep cost and latency bounded.
+_MAX_INPUT_CHARS = 24000
+
+
+@register("summarization", "Condense text while preserving all clinical specifics.")
+def run(request: CapabilityRequest) -> CapabilityResult:
+    text = (request.text or "").strip()
+    if not text:
+        return CapabilityResult(text="No input text was supplied to summarize.")
+
+    if len(text) <= _PASSTHROUGH_CHARS:
+        return CapabilityResult(
+            text=text, artifacts={"summarization": "passthrough (input already short)"}
+        )
+
+    truncated = len(text) > _MAX_INPUT_CHARS
+    payload = text[:_MAX_INPUT_CHARS]
+
+    instruction = request.instruction or "Summarize the following clinical text."
+    prompt = f"TASK: {instruction}\n\nTEXT:\n{payload}"
+
+    try:
+        summary, model_id = chat_text(
+            prompt, system=_SYSTEM, max_tokens=1200, temperature=0.2
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise CapabilityError("summarization", str(exc), exc) from exc
+
+    if not summary:
+        raise CapabilityError("summarization", f"{model_id} returned empty text")
+
+    record_model("summarization", model_id)
+    return CapabilityResult(
+        text=summary,
+        artifacts={
+            "model": model_id,
+            "input_chars": len(text),
+            "output_chars": len(summary),
+            "truncated": truncated,
+        },
     )
-    return response.choices[0].message.content or ""
