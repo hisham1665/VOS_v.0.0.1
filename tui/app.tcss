@@ -1,0 +1,146 @@
+Screen {
+    background: $background;
+    layout: vertical;
+}
+
+#topbar {
+    height: 1;
+    background: $panel;
+    padding: 0 1 0 0;
+}
+
+#main {
+    height: 1fr;
+}
+
+#chat {
+    width: 1fr;
+    padding: 1 2;
+    scrollbar-size-vertical: 1;
+}
+
+#sidebar {
+    width: 38;
+    border-left: tall $primary 30%;
+    padding: 1 1;
+    background: $panel;
+}
+
+#sidebar.hidden {
+    display: none;
+}
+
+#side-files {
+    margin-top: 1;
+}
+
+.logo {
+    color: $accent;
+    margin-bottom: 0;
+}
+
+.bubble {
+    height: auto;
+    margin: 0 0 1 0;
+    padding: 0 1;
+}
+
+.bubble .who {
+    color: $text-muted;
+    margin-bottom: 0;
+}
+
+.bubble Markdown {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+}
+
+.user {
+    border-left: thick $accent;
+    background: $boost;
+    margin-left: 8;
+}
+
+.user .chips {
+    color: $warning;
+}
+
+.assistant {
+    border-left: thick $primary;
+    margin-top: 1;
+}
+
+.user {
+    margin-top: 1;
+}
+
+.analysis {
+    border: round $primary;
+    padding: 0 1;
+}
+
+.analysis.sev-critical { border: round $error; }
+.analysis.sev-high { border: round darkorange; }
+.analysis.sev-moderate { border: round $warning; }
+.analysis.sev-low { border: round dodgerblue; }
+.analysis.sev-normal { border: round $success; }
+
+.system {
+    color: $text-muted;
+    padding: 0 1;
+}
+
+.welcome {
+    border: round $primary 40%;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+.error {
+    border-left: thick $error;
+    color: $error;
+}
+
+#composer {
+    height: auto;
+    padding: 0 1;
+    background: $panel;
+}
+
+#prompt {
+    border: round $accent;
+    background: $surface;
+}
+
+#prompt:focus {
+    border: round $accent-lighten-1;
+}
+
+#statusline {
+    height: 1;
+    padding: 0 1;
+}
+
+SessionPicker {
+    align: center middle;
+}
+
+#picker {
+    width: 90;
+    max-width: 95%;
+    height: auto;
+    max-height: 80%;
+    border: round $accent;
+    background: $panel;
+    padding: 1 2;
+}
+
+#picker-title {
+    margin-bottom: 1;
+}
+
+#picker-list {
+    height: auto;
+    max-height: 20;
+}

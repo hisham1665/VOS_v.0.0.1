@@ -68,6 +68,19 @@ python main.py --study ./studies/patient-001 \
 Reports are written to `outputs/reports/` as markdown and JSON, and a summary
 prints to the terminal.
 
+### Interactive chat
+
+```bash
+python main.py --chat --name patient-001   # full-screen chat; attach with @path or drag & drop
+python main.py --resume                    # pick up any earlier session
+```
+
+Attach scans, PDFs and notes, ask questions, and ask follow-ups that remember
+everything uploaded and said in the session. Each session lives in
+`sessions/<name>_<id>/` with its uploads, reports, memory, a JSONL transcript
+and a terminal log. Design and memory strategy:
+[docs/CHAT_TUI.md](docs/CHAT_TUI.md).
+
 ### CLI
 
 | Flag | Purpose |
@@ -81,6 +94,9 @@ prints to the terminal.
 | `--doctor` | Environment preflight, then exit |
 | `--clear-cache` | Drop cached images and model outputs |
 | `--ask PROMPT` | Free-form job through the LLM planner instead of the fixed plan |
+| `--chat` / `--name NAME` | Open the chat TUI on a new (named) session |
+| `--resume [ID]` | Open the chat TUI on a saved session (picker without ID) |
+| `--sessions` | List saved chat sessions |
 | `--verbose` | Per-stage timing logs |
 
 Exit codes: `0` normal, `3` triage is **immediate**, `1` error. Alert on `3`.

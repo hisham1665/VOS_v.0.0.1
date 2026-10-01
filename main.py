@@ -4,6 +4,12 @@
     python main.py --study ./scan.dcm --history "3 days fever" --question "pneumonia?"
     python main.py --doctor
     python main.py --ask "compare these two chest films" --study ./studies/p1
+
+Interactive chat (full-screen TUI, sessions saved under ./sessions):
+    python main.py --chat [--name patient-001]
+    python main.py --resume            # pick a saved session
+    python main.py --resume a1b2c3     # resume by id or name
+    python main.py --sessions          # list saved sessions
 """
 
 from __future__ import annotations
@@ -95,6 +101,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="delete cached preprocessed images and model outputs, then exit",
     )
     parser.add_argument(
+        "--chat", action="store_true", help="open the interactive chat TUI (new session)"
+    )
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="__pick__",
+        metavar="ID_OR_NAME",
+        help="open the chat TUI on a saved session (no value: choose from a list)",
+    )
+    parser.add_argument("--name", metavar="NAME", help="name for a new chat session")
+    parser.add_argument(
+        "--sessions", action="store_true", help="list saved chat sessions and exit"
+    )
+    parser.add_argument(
         "--verbose", "-v", action="store_true", help="debug-level logging"
     )
     return parser
@@ -115,12 +135,28 @@ def main(argv: list[str] | None = None) -> int:
     if args.doctor:
         return _run_doctor()
 
+    if args.sessions:
+        from chat.session import SessionStore
+
+        sessions = SessionStore().list()
+        if not sessions:
+            print("No saved sessions.")
+        for s in sessions:
+            print(f"{s.id}  {s.meta.updated_at[:16].replace('T', ' ')}  "
+                  f"{len(s.meta.files):>3} file(s)  {len(s.meta.analyses):>2} run(s)  {s.name}  [{s.folder}]")
+        return 0
+
+    if args.chat or args.resume:
+        from tui.app import run as run_tui
+
+        return run_tui(resume=args.resume, name=args.name)
+
     if args.ask:
         return _run_freeform(args)
 
     if not args.study:
         build_parser().print_help()
-        print("\nError: --study is required (or use --doctor / --ask).", file=sys.stderr)
+        print("\nError: --study is required (or use --chat / --resume / --doctor / --ask).", file=sys.stderr)
         return 2
 
     return _run_study(args)

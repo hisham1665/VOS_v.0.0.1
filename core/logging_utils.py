@@ -14,6 +14,10 @@ from contextlib import contextmanager
 
 _configured = False
 _lock = threading.Lock()
+_FORMATTER = logging.Formatter(
+    fmt="%(asctime)s %(levelname)-7s [%(name)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 def configure(level: str = "INFO") -> None:
@@ -23,17 +27,46 @@ def configure(level: str = "INFO") -> None:
         if _configured:
             return
         handler = logging.StreamHandler(sys.stderr)
-        handler.setFormatter(
-            logging.Formatter(
-                fmt="%(asctime)s %(levelname)-7s [%(name)s] %(message)s",
-                datefmt="%H:%M:%S",
-            )
-        )
+        handler.setFormatter(_FORMATTER)
         root = logging.getLogger("maos")
         root.setLevel(getattr(logging, level.upper(), logging.INFO))
         root.addHandler(handler)
         root.propagate = False
         _configured = True
+
+
+def set_console_logging(enabled: bool) -> None:
+    """Attach or detach the stderr handler.
+
+    A full-screen TUI owns the terminal; a stray log line written to stderr
+    tears the display. The TUI turns console logging off and routes records to
+    the session's log file and status line instead.
+    """
+    configure()
+    root = logging.getLogger("maos")
+    console = [
+        h for h in root.handlers
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        and getattr(h, "stream", None) in (sys.stderr, sys.__stderr__)
+    ]
+    if enabled and not console:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(_FORMATTER)
+        root.addHandler(handler)
+    elif not enabled:
+        for handler in console:
+            root.removeHandler(handler)
+
+
+def add_handler(handler: logging.Handler) -> None:
+    configure()
+    if handler.formatter is None:
+        handler.setFormatter(_FORMATTER)
+    logging.getLogger("maos").addHandler(handler)
+
+
+def remove_handler(handler: logging.Handler) -> None:
+    logging.getLogger("maos").removeHandler(handler)
 
 
 def get_logger(name: str) -> logging.Logger:

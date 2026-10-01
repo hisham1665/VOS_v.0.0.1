@@ -29,3 +29,7 @@ openai>=1.0.0                  # OpenAI-compatible clients, incl. Ollama
 
 # --- literature lookup --------------------------------------------------
 ddgs>=9.0.0
+
+# --- interactive chat ---------------------------------------------------
+textual>=1.0                   # full-screen TUI (python main.py --chat)
+sentence-transformers>=2.2     # optional: dense retrieval; BM25-only without it

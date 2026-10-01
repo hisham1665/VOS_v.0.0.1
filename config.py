@@ -183,6 +183,38 @@ RUNTIME = RuntimeConfig()
 OUTPUT_DIR = Path(os.environ.get("MAOS_OUTPUT_DIR", str(ROOT / "outputs")))
 REPORT_DIR = OUTPUT_DIR / "reports"
 
+# Interactive chat sessions: one folder per session holding its uploads,
+# reports, memory and full transcript. Contains patient data -> git-ignored.
+SESSIONS_DIR = Path(os.environ.get("MAOS_SESSIONS_DIR", str(ROOT / "sessions")))
+
+
+@dataclass(frozen=True)
+class ChatConfig:
+    """Context-window budgets and retrieval knobs for the chat engine.
+
+    Budgets are in characters (~4 chars per token) so they can be enforced
+    without a tokenizer. Defaults keep a prompt near 8k tokens, which fits
+    every backend we route to with room for the answer.
+    """
+
+    brief_chars: int = _env_int("MAOS_CHAT_BRIEF_CHARS", 6000)
+    summary_chars: int = _env_int("MAOS_CHAT_SUMMARY_CHARS", 3000)
+    recent_chars: int = _env_int("MAOS_CHAT_RECENT_CHARS", 9000)
+    retrieved_chars: int = _env_int("MAOS_CHAT_RETRIEVED_CHARS", 9000)
+    retrieve_k: int = _env_int("MAOS_CHAT_RETRIEVE_K", 8)
+    # auto: dense embeddings when sentence-transformers is importable.
+    embeddings: str = os.environ.get("MAOS_CHAT_EMBEDDINGS", "auto").lower()
+    embedding_model: str = os.environ.get(
+        "MAOS_CHAT_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+    )
+    answer_max_tokens: int = _env_int("MAOS_CHAT_ANSWER_TOKENS", 1400)
+    # The literature stage adds a web search per analysis; off by default in
+    # chat for latency, toggle with /literature.
+    literature: bool = _env_bool("MAOS_CHAT_LITERATURE", False)
+
+
+CHAT = ChatConfig()
+
 
 SUPPORTED_IMAGE_SUFFIXES = {
     ".png",

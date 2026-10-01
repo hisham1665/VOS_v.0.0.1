@@ -20,3 +20,6 @@ outputs/*.json
 studies/
 phi/
 *.dcm
+
+# interactive chat sessions (uploads, transcripts -- patient data)
+sessions/
