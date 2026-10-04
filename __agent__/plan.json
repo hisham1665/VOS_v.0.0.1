@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "items": [
+    {
+      "title": "trace PDF/document model routing and degraded status behavior",
+      "status": "in-progress"
+    },
+    {
+      "title": "fix native PDF text analysis and tolerant lab fallback",
+      "status": "pending"
+    },
+    {
+      "title": "prevent false normal results on incomplete runs",
+      "status": "pending"
+    },
+    {
+      "title": "add regression tests and validate",
+      "status": "pending"
+    }
+  ],
+  "updated_at": "2026-09-30T17:44:30.315Z",
+  "session_id": "01a0f2d1-3666-71c2-8de4-a6077ab0e583"
+}
