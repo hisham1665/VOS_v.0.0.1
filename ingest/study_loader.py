@@ -22,7 +22,8 @@ from core.errors import StudyError
 from core.logging_utils import get_logger, timed
 from ingest.dicom_utils import is_dicom
 from ingest.document_loader import load_document
-from ingest.preprocess import prepare_image
+from ingest.preprocess import prepare_dicom_frames, prepare_image
+from ingest.series import assemble_series
 from models import Modality, PatientContext, Study, StudyDocument, StudyImage
 
 _log = get_logger("study")
@@ -111,17 +112,6 @@ def load_study(
         else:
             study.skipped_files.append(f"{path.name}: unsupported extension '{suffix}'")
 
-    # 0 means unlimited; positive values bound image inference explicitly.
-    if RUNTIME.max_images_per_study > 0 and len(image_files) > RUNTIME.max_images_per_study:
-        limit = RUNTIME.max_images_per_study
-        step = len(image_files) / limit
-        sampled = [image_files[int(i * step)] for i in range(limit)]
-        study.warnings.append(
-            f"Study contains {len(image_files)} images; evenly sampled {len(sampled)} "
-            f"for analysis (raise MAOS_MAX_IMAGES to include more)."
-        )
-        image_files = sampled
-
     if not image_files and not document_files:
         raise StudyError(
             f"No readable images or documents found in {root}. Supported images: "
@@ -133,8 +123,9 @@ def load_study(
         with timed(_log, f"decoding {len(image_files)} image(s)"):
             workers = max(1, min(RUNTIME.max_workers, len(image_files)))
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-                results = list(pool.map(lambda p: _load_one(p, root), image_files))
+                results = [item for batch in pool.map(lambda p: _load_file(p, root), image_files) for item in batch]
         _add_images(study, results)
+        assemble_series(study, max_images=RUNTIME.max_images_per_study)
 
     if document_files:
         with timed(_log, f"extracting {len(document_files)} document(s)"):
@@ -157,6 +148,41 @@ def load_study(
     return study
 
 
+def _image_from_prepared(path, root, prepared, info, *, dicom=False):
+    metadata = info.get("dicom_metadata", {}) or {}
+    width, height = info.get("prepared_size", [0, 0])
+    index = metadata.get("frame_selected")
+    image_id = _image_id(path, root)
+    if metadata.get("frames", 1) > 1:
+        image_id += f"#frame={index + 1}"
+    return StudyImage(
+        image_id=image_id, source_path=str(path.resolve()), prepared_path=str(prepared), content_hash=info["content_hash"],
+        prepared_hash=info.get("prepared_hash"),
+        modality=_infer_modality(path, metadata), body_part=metadata.get("BodyPartExamined"), view=metadata.get("ViewPosition"),
+        width=width, height=height, is_dicom=dicom, metadata=metadata, frame_index=index,
+        quality=info.get("quality", {}), warnings=list(info.get("warnings", [])),
+    )
+
+
+def _load_file(path, root):
+    dicom = path.suffix.lower() in {".dcm", ".dicom", ".ima"} or (not path.suffix and is_dicom(path))
+    if not dicom:
+        return [_load_one(path, root)]
+    results = []
+    try:
+        if path.stat().st_size > RUNTIME.max_file_mb * 1024 * 1024:
+            raise ValueError(f"file exceeds MAOS_MAX_FILE_MB={RUNTIME.max_file_mb}")
+        for prepared, info in prepare_dicom_frames(path):
+            if prepared is None:
+                index = info.get("dicom_metadata", {}).get("frame_selected", 0)
+                results.append((path, None, f"frame {index + 1}: {info['error']}"))
+            else:
+                results.append((path, _image_from_prepared(path, root, prepared, info, dicom=True), None))
+    except Exception as exc:
+        results.append((path, None, f"{type(exc).__name__}: {exc}"))
+    return results
+
+
 def _load_one(path: Path, root: Path) -> tuple[Path, StudyImage | None, str | None]:
     try:
         if path.stat().st_size > RUNTIME.max_file_mb * 1024 * 1024:
@@ -164,16 +190,7 @@ def _load_one(path: Path, root: Path) -> tuple[Path, StudyImage | None, str | No
         suffix = path.suffix.lower()
         dicom = suffix in {".dcm", ".dicom", ".ima"} or (suffix == "" and is_dicom(path))
         prepared, info = prepare_image(path, is_dicom=dicom)
-        metadata = info.get("dicom_metadata", {}) or {}
-        width, height = info.get("prepared_size", [0, 0])
-        image = StudyImage(
-            image_id=_image_id(path, root), source_path=str(path.resolve()),
-            prepared_path=str(prepared), content_hash=info["content_hash"],
-            modality=_infer_modality(path, metadata),
-            body_part=metadata.get("BodyPartExamined"), view=metadata.get("ViewPosition"),
-            width=width, height=height, is_dicom=dicom, metadata=metadata,
-            warnings=list(info.get("warnings", [])),
-        )
+        image = _image_from_prepared(path, root, prepared, info, dicom=dicom)
         return path, image, None
     except Exception as exc:
         _log.warning("could not read %s: %s", path.name, exc)

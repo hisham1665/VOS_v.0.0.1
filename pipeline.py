@@ -23,7 +23,7 @@ from agents.planner import build_radiology_plan, estimate_cost
 from config import OUTPUT_DIR, RUNTIME
 from core.logging_utils import get_logger, timed
 from ingest.study_loader import load_study
-from models import Graph, RadiologyReport, Study
+from models import Graph, RadiologyReport, Study, TaskBudget
 from reporting.report_builder import write_report
 
 _log = get_logger("pipeline")
@@ -37,6 +37,9 @@ def analyze_study(
     with_literature: bool = True,
     write_output: bool = True,
     output_dir: Path | None = None,
+    prior_assessment: dict | None = None,
+    clinician_updates: dict[str, str] | None = None,
+    task_budget: TaskBudget | dict | None = None,
 ) -> tuple[RadiologyReport, Study, Graph]:
     """Interpret every supported input in ``folder`` and return the run objects."""
     started = time.perf_counter()
@@ -50,11 +53,15 @@ def analyze_study(
             clinical_history=clinical_history,
             referring_question=referring_question,
         )
+        study.patient.prior_assessment = dict(prior_assessment or {})
+        study.patient.clinician_updates = dict(clinician_updates or {})
 
     with timed(_log, "stage 2/5 plan"):
-        graph = build_radiology_plan(study, with_literature=with_literature)
+        budget = TaskBudget.model_validate(task_budget) if task_budget is not None else None
+        graph = build_radiology_plan(study, with_literature=with_literature, budget=budget)
         _log.info("plan cost estimate: %s", estimate_cost(graph))
-        ManagerAgent().write_plan(graph, plan_path)
+        if write_output:
+            ManagerAgent().write_plan(graph, plan_path)
 
     with timed(_log, "stage 3/5 execute"):
         graph = GraphExecutor().run(graph, study=study)
@@ -81,7 +88,7 @@ def analyze_study(
     return report, study, graph
 
 
-def run_freeform(prompt: str, folder: str | Path | None = None) -> Graph:
+def run_freeform(prompt: str, folder: str | Path | None = None, *, task_budget: TaskBudget | dict | None = None) -> Graph:
     """Run an open-ended job through the LLM planner rather than the fixed plan.
 
     Kept for non-radiology questions ("compare these two guidelines"), where
@@ -92,7 +99,7 @@ def run_freeform(prompt: str, folder: str | Path | None = None) -> Graph:
         study = load_study(folder)
 
     manager = ManagerAgent()
-    graph = manager.create_plan(prompt, study=study)
+    graph = manager.create_plan(prompt, study=study, budget=TaskBudget.model_validate(task_budget) if task_budget is not None else None)
     manager.write_plan(graph, OUTPUT_DIR / "plan.md")
 
     graph = GraphExecutor().run(graph, study=study)
@@ -111,6 +118,7 @@ def preflight() -> dict:
     from capabilities.model_zoo import coverage_table
     from capabilities.xrv_backend import available as xrv_available
     from capabilities.vision import OLLAMA_MODEL, _ollama_reachable
+    from capabilities.vision import VLM_BACKEND, local_server_info
     from config import describe
     from ingest.dicom_utils import PYDICOM_AVAILABLE
     import importlib.util
@@ -119,6 +127,7 @@ def preflight() -> dict:
         "config": describe(),
         "backends": backend_report(),
         "capabilities": registry.names(),
+        "capability_dna": registry.metadata(),
         "model_zoo": coverage_table(),
         "torchxrayvision": xrv_available(),
         "dicom_support": PYDICOM_AVAILABLE,
@@ -128,12 +137,14 @@ def preflight() -> dict:
             "xlsx": bool(importlib.util.find_spec("openpyxl")),
         },
         "ollama": {"reachable": _ollama_reachable(), "model": OLLAMA_MODEL},
+        "local_vision_server": local_server_info(),
         "cache_dir": str(RUNTIME.cache_dir),
     }
 
     problems: list[str] = []
     backends = checks["backends"]
-    if not (backends["hf_api"] or checks["ollama"]["reachable"] or backends["transformers"]):
+    if not (backends["hf_api"] or checks["ollama"]["reachable"] or backends["transformers"]
+            or checks["local_vision_server"]["reachable"]):
         problems.append(
             "No vision backend available. Set HF_TOKEN in .env, run Ollama with a "
             "medical VLM, or install transformers."
@@ -169,4 +180,10 @@ def preflight() -> dict:
         p.startswith("No vision backend") or p.startswith("No text backend")
         for p in problems
     )
+    if VLM_BACKEND in {"openai", "ollama"} and not checks["local_vision_server"]["reachable"]:
+        problems.append("Selected local vision server/model is unavailable")
+        checks["ready"] = False
+    if VLM_BACKEND == "ollama" and checks["local_vision_server"]["reachable"] and not checks["local_vision_server"]["vision_verified"]:
+        problems.append("Selected Ollama model does not advertise vision capability")
+        checks["ready"] = False
     return checks

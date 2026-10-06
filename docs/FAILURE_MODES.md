@@ -237,7 +237,8 @@ rescale and windowing.
 
 **Now:** `ingest/dicom_utils.py` applies the modality LUT
 (`RescaleSlope`/`Intercept`), the window preset, `MONOCHROME1` inversion, and
-mid-slice selection for multi-frame series. Missing `pydicom` degrades to
+all-frame ingestion for multi-frame objects (the compatibility preview API still
+selects one frame). Missing `pydicom` degrades to
 "DICOM skipped" rather than crashing.
 
 ---

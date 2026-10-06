@@ -24,7 +24,7 @@ from core.logging_utils import get_logger
 
 _log = get_logger("document_analysis")
 
-_SCHEMA_VERSION = "document-analysis-v2"
+_SCHEMA_VERSION = "document-analysis-v3"
 _DOCUMENT_TYPES = {
     "blood_report",
     "lab_report",
@@ -104,10 +104,28 @@ def run(request: CapabilityRequest) -> CapabilityResult:
     quality_issues: dict[str, list[str]] = {}
     read_errors: dict[str, str] = dict(selection_errors)
     models_used: set[str] = set()
+    selections: dict[str, dict] = {}
+    degraded_reads: list[str] = []
+    verification_requests: list[dict] = []
 
     for document, page, source_ref in targets:
         try:
             analysis = _analyze_page(document, page, source_ref, request)
+            if page.text.strip():
+                from core.evidence_checks import unsupported_numbers
+
+                grounded = []
+                analysis = {**analysis, "quality_issues": list(analysis["quality_issues"])}
+                for finding in analysis["findings"]:
+                    missing = unsupported_numbers(finding["description"], page.text)
+                    if missing:
+                        analysis["quality_issues"].append(f"{finding['label']}: numeric tokens {missing} absent from native page; observation withheld pending verification")
+                    else:
+                        grounded.append(finding)
+                analysis["findings"] = grounded
+            selections[source_ref] = analysis.get("_model_selection", {})
+            if analysis.get("model") == "native-lab-extraction":
+                degraded_reads.append(source_ref)
             reads[source_ref] = analysis["raw"]
             document_types[source_ref] = analysis["document_type"]
             findings.extend(analysis["findings"])
@@ -121,6 +139,14 @@ def run(request: CapabilityRequest) -> CapabilityResult:
             issues = _unique_strings(issues)
             if issues:
                 quality_issues[source_ref] = issues
+            if (analysis.get("model") == "native-lab-extraction" or analysis["quality_issues"]
+                    or page.warnings or not page.text.strip()):
+                from capabilities.verification import request_verification
+
+                verification_requests.append(request_verification(
+                    "verify_documents", f"Extraction needs recheck: {source_ref}",
+                    artifacts={"document_ids": [document.document_id], "document_page_numbers": [page.page_number]},
+                ))
 
             model_id = analysis.get("model")
             if model_id:
@@ -129,6 +155,12 @@ def run(request: CapabilityRequest) -> CapabilityResult:
             message = f"{type(exc).__name__}: {exc}"
             _log.warning("document page %s failed: %s", source_ref, message)
             read_errors[source_ref] = message
+            from capabilities.verification import request_verification
+
+            verification_requests.append(request_verification(
+                "verify_documents", f"Document page extraction failed: {source_ref}",
+                artifacts={"document_ids": [document.document_id], "document_page_numbers": [page.page_number]},
+            ))
 
     if not reads:
         details = "; ".join(
@@ -176,6 +208,10 @@ def run(request: CapabilityRequest) -> CapabilityResult:
             "quality_issues": quality_issues,
             "read_errors": read_errors,
             "models_used": sorted(models_used),
+            "_model_selection": selections,
+            "degraded_reads": degraded_reads,
+            "verification_requests": verification_requests,
+            "_models_used": {"document_analysis": ", ".join(sorted(models_used))},
         },
     )
 
@@ -206,7 +242,7 @@ def _analyze_page(
     # configured VLM, while their text backend is available. Use vision only
     # for image-only/scanned pages.
     has_native_text = bool(native_text.strip())
-    if image_path is not None and not has_native_text:
+    if image_path is not None and (not has_native_text or request.artifacts.get("verify_page_image")):
         route = vision._select_route()
         model_hint = str(
             getattr(vision, "_route_model", lambda selected: selected)(route)
@@ -228,11 +264,13 @@ def _analyze_page(
             return cached
         result = vision._dispatch(route, image_path, prompt)
     else:
+        from capabilities.text_catalog import profiles
+
         backend = os.environ.get("MAOS_TEXT_BACKEND", "auto").lower()
         model_hint = str(getattr(hf_backend.MODELS, "text_llm", ""))
         key = _cache_key(
             backend=f"text:{backend}",
-            model=model_hint,
+            model=cache.make_key(model_hint, [entry[2].to_dict() for entry in profiles("extraction")]),
             system_prompt=_SYSTEM_PROMPT,
             prompt=prompt,
             full_text=native_text,
@@ -249,6 +287,8 @@ def _analyze_page(
                 system=_SYSTEM_PROMPT,
                 max_tokens=1400,
                 temperature=0.1,
+                task="extraction", json_mode=True,
+                validator=lambda raw: _validate_response(_parse_json(raw), source_ref),
             )
         except Exception as exc:
             # A blood/lab report still contains useful, exact evidence when
@@ -271,16 +311,17 @@ def _analyze_page(
         # readable `FINDINGS:` block. Recover exact lab lines without making a
         # diagnostic claim; malformed non-lab responses still fail loudly.
         fallback = _fallback_from_laboratory_text(
-            raw, source_ref, reason=f"text model returned non-JSON: {exc}"
+            native_text, source_ref, reason=f"text model returned non-JSON: {exc}"
         )
         if fallback is None:
             raise
         return fallback
-    
+
     output = {
         "raw": raw,
         "model": model_id,
         **parsed,
+        "_model_selection": hf_backend.text_selection_trace() if backend.startswith("text:") else {"route": backend, "model": model_id},
     }
     # Cache is written only after parsing and validation have succeeded.  A
     # backend error or malformed response therefore never becomes a healthy hit.
@@ -503,6 +544,7 @@ def _read_cached(key: str, source_ref: str) -> dict[str, Any] | None:
     return {
         "raw": raw,
         "model": str(cached.get("model", "cached")),
+        "_model_selection": {"cache_hit": True, "model": str(cached.get("model", "cached"))},
         **parsed,
     }
 
@@ -532,24 +574,43 @@ def _cache_key(
 
 
 def _context_for_prompt(request: CapabilityRequest) -> str:
+    # Extraction is a property of the page, not the changing graph job or
+    # referring question. Otherwise every follow-up invalidates every PDF read.
     lines: list[str] = []
-    if request.instruction:
-        lines.append(f"Planner task: {request.instruction}")
-    if request.text:
-        lines.append(f"Upstream context (untrusted): {request.text}")
     study = getattr(request, "study", None)
     patient = getattr(study, "patient", None)
     if patient is not None:
         for label, field in (
             ("Age", "age"),
             ("Sex", "sex"),
-            ("Clinical history", "clinical_history"),
-            ("Referring question", "referring_question"),
         ):
             value = getattr(patient, field, None)
             if value:
                 lines.append(f"{label}: {value}")
     return "\n".join(lines) or "No additional context was supplied."
+
+
+def _fallback_from_laboratory_text(text: str, source_ref: str, *, reason: str) -> dict | None:
+    """Salvage exact native lab lines; never diagnose or fabricate ranges.
+
+    This deliberately does not accept arbitrary model prose or non-lab notes.
+    Recognizable names plus reported numeric values are retained as uncertain
+    observations, so a backend outage is not mistaken for a normal result.
+    """
+    names = r"hemoglobin|haemoglobin|hematocrit|haematocrit|platelets?|wbc|rbc|creatinine|eGFR|bilirubin|albumin|CRP|ESR|potassium|sodium|glucose|HbA1c|ALT|AST|ALP|GGT|urea|BUN|INR|prothrombin|bicarbonate|calcium|phosphate"
+    findings = []
+    for line in text.splitlines():
+        match = re.search(rf"\b({names})\b", line, re.I)
+        if not match or not re.search(r"\d", line[match.end():]):
+            continue
+        findings.append({"label": match.group(0), "description": line.strip(),
+                         "severity": "indeterminate", "confidence": None})
+    if not findings:
+        return None
+    payload = {"document_type": "lab_report", "findings": findings,
+               "quality_issues": [f"Native-text fallback only; clinical interpretation unavailable ({reason})."]}
+    return {"raw": json.dumps(payload, ensure_ascii=False), "model": "native-lab-extraction",
+            **_validate_response(payload, source_ref)}
 
 
 def _page_quality_issues(document: Any, page: Any) -> list[str]:

@@ -24,6 +24,8 @@ caps how many threads may touch the GPU simultaneously.
 from __future__ import annotations
 
 import threading
+import os
+import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable
@@ -32,6 +34,7 @@ from config import HF_TOKEN, MODELS, RUNTIME
 from core.errors import BackendError, ConfigError
 from core.logging_utils import get_logger, timed
 from core.retry import with_retry
+from core.routing import TaskRequirements, performance_history, rank_candidates
 
 _log = get_logger("hf")
 
@@ -343,7 +346,7 @@ def remote_text(
     temperature: float = 0.3,
 ) -> tuple[str, str]:
     """Hosted text generation through the HF Inference API."""
-    target = model_id or MODELS.summarizer
+    target = model_id or MODELS.hf_text_llm
     client = inference_client(target)
 
     messages: list[dict[str, str]] = []
@@ -388,7 +391,7 @@ def groq_client():
             if _groq_client is None:
                 from groq import Groq
 
-                _groq_client = Groq(api_key=GROQ_API_KEY, timeout=RUNTIME.call_timeout)
+                _groq_client = Groq(api_key=GROQ_API_KEY, timeout=RUNTIME.call_timeout, max_retries=0)
     return _groq_client
 
 
@@ -398,6 +401,10 @@ def chat_text(
     system: str | None = None,
     max_tokens: int = 1024,
     temperature: float = 0.3,
+    task: str = "conversation",
+    json_mode: bool = False,
+    validator: Callable[[str], Any] | None = None,
+    constraints: dict | None = None,
 ) -> tuple[str, str]:
     """Generate text, preferring Groq and falling back to HF Inference.
 
@@ -408,38 +415,68 @@ def chat_text(
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    try:
-        client = groq_client()
+    from config import GROQ_API_KEY
+    from capabilities.text_catalog import profiles
 
-        def _call() -> str:
-            completion = client.chat.completions.create(
-                model=MODELS.text_llm,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            return (completion.choices[0].message.content or "").strip()
+    requested_backend = os.environ.get("MAOS_TEXT_BACKEND", "auto").lower()
+    entries = [item for item in profiles(task)
+               if (requested_backend == "auto" or item[0] == requested_backend)
+               and ((item[0] == "groq" and GROQ_API_KEY) or (item[0] == "hf" and hf_api_available()))]
+    required = {"skills": (task,), "inputs": ("text",),
+                "outputs": ("json",) if json_mode else ("text",),
+                "context_tokens": (len(prompt) + len(system or "")) // 4 + max_tokens}
+    limits = dict(constraints or {})
+    for key in ("skills", "inputs", "outputs"):
+        if key in limits:
+            limits[key] = tuple(dict.fromkeys(required[key] + tuple(limits[key])))
+    limits["context_tokens"] = max(required["context_tokens"], int(limits.get("context_tokens", 0)))
+    requirements = TaskRequirements(**{**required, **limits})
+    candidates, decisions = rank_candidates([item[2] for item in entries], requirements, performance_history())
+    _TEXT_TRACE.decision = {"task": task, "requirements": requirements.to_dict(), "candidates": decisions, "attempts": []}
+    by_name = {item[2].name: item for item in entries}
+    errors = []
+    for dna in candidates:
+        provider, model_id, _ = by_name[dna.name]
+        started = time.perf_counter()
+        try:
+            if provider == "groq":
+                client = groq_client()
+                def _call() -> str:
+                    kwargs = {"response_format": {"type": "json_object"}} if json_mode else {}
+                    completion = client.chat.completions.create(model=model_id, messages=messages,
+                                                               temperature=temperature, max_tokens=max_tokens, **kwargs)
+                    return (completion.choices[0].message.content or "").strip()
+                text = with_retry(_call, attempts=RUNTIME.max_retries,
+                                  base_delay=RUNTIME.retry_base_delay, label=dna.name)
+            else:
+                text, _ = remote_text(prompt, system=system, model_id=model_id,
+                                      max_tokens=max_tokens, temperature=temperature)
+            if not text:
+                raise BackendError("empty model response")
+            if json_mode:
+                import json
 
-        text = with_retry(
-            _call,
-            attempts=RUNTIME.max_retries,
-            base_delay=RUNTIME.retry_base_delay,
-            label=f"groq:{MODELS.text_llm}",
-        )
-        return text, MODELS.text_llm
-    except ConfigError:
-        _log.info("Groq unavailable, routing text generation to Hugging Face")
-    except Exception as exc:  # noqa: BLE001 - fall through to HF
-        _log.warning("Groq call failed (%s); falling back to Hugging Face", exc)
+                if not isinstance(json.loads(text), dict):
+                    raise ValueError("JSON response must be an object")
+            if validator:
+                validator(text)
+            performance_history().record(dna.name, success=True, seconds=time.perf_counter() - started)
+            _TEXT_TRACE.decision["attempts"].append({"model": dna.name, "status": "accepted"})
+            _log.info("selected %s for %s from %d eligible model(s)", dna.name, task, len(candidates))
+            return text, model_id
+        except Exception as exc:  # noqa: BLE001 - an alternative must pass the same evaluator
+            performance_history().record(dna.name, success=False, seconds=time.perf_counter() - started, cooldown_s=30)
+            _TEXT_TRACE.decision["attempts"].append({"model": dna.name, "status": "rejected", "error_type": type(exc).__name__})
+            _log.warning("text model %s rejected (%s); adapting selection", dna.name, type(exc).__name__)
+            errors.append(f"{dna.name}: {type(exc).__name__}: {exc}")
+    raise BackendError("No usable text model satisfies the task. " + ("; ".join(errors) or "Check credentials, catalog, context budget, or recent endpoint cooldown."))
 
-    if hf_api_available():
-        return remote_text(
-            prompt, system=system, max_tokens=max_tokens, temperature=temperature
-        )
 
-    raise BackendError(
-        "No text backend available. Set GROQ_API_KEY or HF_TOKEN in .env."
-    )
+_TEXT_TRACE = threading.local()
+
+
+def text_selection_trace() -> dict:
+    return dict(getattr(_TEXT_TRACE, "decision", {}))
 
 
 def backend_report() -> dict[str, Any]:

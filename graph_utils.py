@@ -40,6 +40,9 @@ def validate_graph(graph: Graph) -> None:
                 raise GraphValidationError(
                     f"Node '{node.id}' depends on '{dep}' which does not exist"
                 )
+        for dep in node.optional_dependencies + node.partial_requires:
+            if dep not in node.depends_on:
+                raise GraphValidationError(f"Node '{node.id}' has a dependency policy for non-parent '{dep}'")
 
     if not any(not n.depends_on for n in graph.nodes):
         raise GraphValidationError("Graph has no root nodes (no starting point)")

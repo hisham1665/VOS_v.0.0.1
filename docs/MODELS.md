@@ -1,7 +1,7 @@
 # Models
 
-Every model is a Hugging Face Hub id, set in `config.py` and overridable by
-environment variable. Swapping a checkpoint never requires a code change.
+Hosted/transformers models use Hugging Face Hub ids; local servers use an explicit
+model alias and URL. All are overridable by environment variable.
 
 ## The roster
 
@@ -40,9 +40,9 @@ which does not fit on a 4GB laptop card alongside anything else. So the VLM
 goes hosted by default and the small models stay local, where they cost a
 sub-second GPU pass instead of a network round trip.
 
-A finding is only trustworthy when two *different kinds* of model agree on it.
-The classifier cannot describe anything, and the VLM cannot be calibrated —
-running both and reporting the disagreement is the point, not redundancy.
+Different model families offer useful corroboration and visible disagreements.
+Agreement alone does not establish a finding as true: both can share distribution
+bias or fail on unsupported anatomy/acquisitions. Clinical verification remains essential.
 
 ## Gated models
 
@@ -57,27 +57,100 @@ To use MedGemma:
 2. Put a token with read access in `.env` as `HF_TOKEN`.
 3. `python main.py --doctor` to confirm.
 
-## Running the VLM locally instead
+## Local vision model below 8B: RTX 2050 / 4GB
 
-Two routes avoid sending images to a hosted endpoint — which matters for real
-patient data.
+**Recommended medical model: MedGemma 1.5 4B, Q4_K_M, with its matching F16 vision
+projector**, served using a recent CUDA-enabled llama.cpp build. The laptop has
+4GB VRAM and 15.7GiB Windows RAM; WSL currently sees only 7.6GiB RAM. Full-precision
+transformers loading is unsuitable for that GPU.
 
-**Ollama** (preferred; auto-detected when reachable):
+Published artifacts verified on 2026-10-05:
 
-```bash
-ollama pull medgemma
+| File in `unsloth/medgemma-1.5-4b-it-GGUF` | Bytes | Approximate size |
+|---|---:|---:|
+| `medgemma-1.5-4b-it-Q4_K_M.gguf` | 2,489,894,976 | 2.49GB / 2.32GiB |
+| `mmproj-F16.gguf` | 851,252,224 | 0.85GB / 0.79GiB |
+
+Both files are needed for images. The quantized package identifies
+`google/medgemma-1.5-4b-it` as its base, architecture Gemma 3, and
+`image-text-to-text` as its task. This is a community quantization of Google's
+medical multimodal model. Review the base model's Health AI Developer Foundations
+terms. File sizes are not peak RAM/VRAM: KV cache, image encoder buffers, operating
+system and other models add memory. Published compatibility was checked; actual
+model loading, image inference, latency and clinical accuracy on this laptop
+remain to be measured after installation.
+
+### Download and serve (Windows PowerShell)
+
+Install a recent [llama.cpp Windows CUDA release](https://github.com/ggml-org/llama.cpp/releases)
+and Hugging Face's `hf` CLI in your Python environment. Download outside the repo:
+
+```powershell
+hf download unsloth/medgemma-1.5-4b-it-GGUF medgemma-1.5-4b-it-Q4_K_M.gguf mmproj-F16.gguf --revision 3855f948626b7ae42bccd082757f15078c53e758 --local-dir "$env:USERPROFILE\models\medgemma-1.5-4b"
+```
+
+From the directory containing the llama.cpp binaries:
+
+```powershell
+.\llama-server.exe -m "$env:USERPROFILE\models\medgemma-1.5-4b\medgemma-1.5-4b-it-Q4_K_M.gguf" --mmproj "$env:USERPROFILE\models\medgemma-1.5-4b\mmproj-F16.gguf" --alias medgemma-1.5-4b --host 127.0.0.1 --port 8080 -c 4096 -ngl 20 --no-mmproj-offload --parallel 1 -b 128 -ub 128
+```
+
+This conservative starting point puts the vision projector on CPU and offloads
+20 language-model layers. Tune `-ngl` against actual VRAM use; reduce it if needed.
+Keep one context and a 4096-token window, rather than allocating the advertised
+128K model context. CPU offload trades speed for memory headroom.
+
+Set these values in Medical AOS `.env`:
+
+```dotenv
+MAOS_VLM_BACKEND=openai
+MAOS_VLM_URL=http://localhost:8080/v1
+MAOS_VLM_MODEL=medgemma-1.5-4b
+MAOS_MAX_WORKERS=2
+MAOS_MAX_GPU_WORKERS=1
+MAOS_MAX_RESIDENT_MODELS=1
+MAOS_DEVICE=cpu
+MAOS_CALL_TIMEOUT=600
+```
+
+`MAOS_DEVICE=cpu` keeps the application's small transformers classifiers off the
+GPU occupied by the separate CUDA server. The server's own `-ngl` still controls
+its GPU use. Ensure the server URL is reachable from whichever Windows/WSL
+environment runs Medical AOS; localhost behavior depends on WSL networking mode.
+Keep text-model configuration/credentials for document reasoning and reporting.
+
+Run `python main.py --doctor`, then a known image case with `--no-literature`.
+The `/v1/models` check proves only that the alias is listed; the first image read
+must verify that the projector is loaded and pixels are actually accepted.
+Per-run provenance records the serving model, image/frame references and coverage.
+
+### Simple Ollama baseline
+
+The verified official **`gemma3:4b`** tag is vision-capable (4.3B parameters,
+Q4_K_M, 3.3GB download, Ollama 0.6+). It is a general-purpose comparison baseline,
+not the medical-specialist recommendation:
+
+```powershell
+ollama pull gemma3:4b
+```
+
+```dotenv
 MAOS_VLM_BACKEND=ollama
-MAOS_OLLAMA_MODEL=medgemma:latest
+MAOS_OLLAMA_MODEL=gemma3:4b
 ```
 
-The pipeline probes `localhost:11434` once per process and confirms the named
-model is actually pulled before choosing this route.
+Ollama availability expires after 5s negative/30s positive. `--doctor` inspects
+`/api/show` for the configured model's `vision` capability. Do not assume a tag
+containing “medgemma” accepts images: the checked `alibayram/medgemma:4b` listing
+advertises text-only support. Arbitrary custom tags need their own verification.
 
-**Local transformers weights** (needs ≥12GB VRAM):
+**Local transformers** remains an option on larger GPUs (`MAOS_VLM_BACKEND=local`,
+automatic local VLM routing requires ≥12GB VRAM).
 
-```bash
-MAOS_VLM_BACKEND=local
-```
+Sources: [official MedGemma 1.5](https://huggingface.co/google/medgemma-1.5-4b-it),
+[quantized files](https://huggingface.co/unsloth/medgemma-1.5-4b-it-GGUF/tree/main),
+[llama.cpp image API/projector support](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md),
+[Ollama Gemma 3 4B](https://ollama.com/library/gemma3:4b).
 
 ## Screening models
 

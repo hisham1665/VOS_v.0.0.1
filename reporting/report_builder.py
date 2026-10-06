@@ -17,6 +17,7 @@ from pathlib import Path
 
 from config import REPORT_DIR
 from core.logging_utils import get_logger
+from core.clinical_reasoning import render_assessment
 from models import DISCLAIMER, Finding, RadiologyReport, Severity, Study
 
 _log = get_logger("report-builder")
@@ -81,6 +82,9 @@ def render_markdown(report: RadiologyReport, study: Study | None = None) -> str:
         lines.extend(f"1. {action}" for action in status.recommended_actions)
         lines.append("")
 
+    if report.clinical_assessment.integrated_summary or report.clinical_assessment.differential:
+        lines += [render_assessment(report.clinical_assessment), ""]
+
     # --- the report proper ------------------------------------------------
     lines.append("## Clinical details")
     lines.append("")
@@ -102,8 +106,8 @@ def render_markdown(report: RadiologyReport, study: Study | None = None) -> str:
     lines.append("## Findings")
     lines.append("")
     if report.findings:
-        lines.append("| Severity | Finding | Location | Confidence | Seen on | Document sources |")
-        lines.append("|---|---|---|---|---|---|")
+        lines.append("| Severity | Finding | Location | Confidence | Seen on | Document sources | Evidence |")
+        lines.append("|---|---|---|---|---|---|---|")
         for finding in report.findings:
             lines.append(
                 f"| {_SEVERITY_BADGE.get(finding.severity, finding.severity.value)} "
@@ -111,7 +115,7 @@ def render_markdown(report: RadiologyReport, study: Study | None = None) -> str:
                 f"| {finding.body_part or '-'} "
                 f"| {_fmt_confidence(finding.confidence)} "
                 f"| {', '.join(finding.image_ids) or '-'} "
-                f"| {', '.join(finding.source_refs) or '-'} |"
+                f"| {', '.join(finding.source_refs) or '-'} | {finding.evidence_kind} |"
             )
         lines.append("")
         for finding in report.findings:
@@ -175,6 +179,32 @@ def render_markdown(report: RadiologyReport, study: Study | None = None) -> str:
 
     if report.screening:
         lines.extend(_render_screening(report))
+    if report.series:
+        lines += ["## Supplied image-series coverage", "",
+                  "_All listed reads are 2D images/frames. Supplied files do not prove a complete acquisition or validated 3D interpretation._", "",
+                  "| Series | Modality / region | Read / selected / decoded frames | Ordering | Coverage |",
+                  "|---|---|---|---|---|"]
+        for series in report.series:
+            read = sum(image_id in report.image_reads for image_id in series.image_ids)
+            lines.append(f"| `{series.series_id}` | {series.modality.value} / {series.body_part or '?'} | {read} / {len(series.image_ids)} / {series.acquired_count} | {series.ordering} | {series.coverage} |")
+        lines.append("")
+    if report.image_reads:
+        lines += ["## Direct image reads", "", "_Generated image interpretations, separate from written imaging reports._", ""]
+        for image_id, text in report.image_reads.items():
+            lines += [f"### `{image_id}`", "", text, ""]
+    if report.evaluation_groups:
+        lines += ["## Evidence coverage", "", "_Operational counts, not measured clinical accuracy._", "",
+                  "| Evidence kind | Modality / region | Read / supplied | Supervised screened | Quality limited |",
+                  "|---|---|---|---|---|"]
+        for row in report.evaluation_groups:
+            lines.append(f"| {row['evidence_kind']} | {row['modality']} / {row['region']} | {row['read']} / {row['supplied']} | {row['screened']} | {row['quality_limited']} |")
+        lines.append("")
+    if report.verification:
+        lines += ["## Additional verification", ""]
+        for record in report.verification:
+            lines.append(f"- **{record.get('kind')} — {record.get('status')}**: {record.get('scope', '')}")
+            lines.extend(f"  - {issue}" for issue in record.get("issues", []))
+        lines.append("")
 
     if report.warnings:
         lines.append("## Warnings")
@@ -194,6 +224,12 @@ def render_markdown(report: RadiologyReport, study: Study | None = None) -> str:
             f"| {f'{duration:.2f}s' if duration else '-'} | {detail} |"
         )
     lines.append("")
+
+    if report.plan_revisions:
+        lines += ["### Runtime plan revisions", ""]
+        for revision in report.plan_revisions:
+            lines.append(f"- `{revision['source_node']}`: {revision['kind']} **{revision['status']}** — {revision['reason']}")
+        lines.append("")
 
     if report.models_used:
         lines.append("### Models used")
@@ -293,6 +329,10 @@ def render_summary(report: RadiologyReport) -> str:
         lines.append(" NEXT STEPS:")
         lines.extend(f"   {i}. {a}" for i, a in enumerate(status.recommended_actions, 1))
         lines.append("-" * 68)
+    if report.clinical_assessment.differential:
+        lines.append(" DIFFERENTIAL:")
+        lines.extend(f"   {h.condition}: {h.status.replace('_', ' ')} — {h.rationale}"
+                     for h in report.clinical_assessment.differential)
     if report.degraded:
         lines.append(" ** DEGRADED RUN -- some stages failed, see warnings **")
         lines.append("-" * 68)

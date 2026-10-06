@@ -38,7 +38,7 @@ SUPPORTED_SUFFIXES = (
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def slugify(text: str, fallback: str = "session") -> str:
@@ -98,6 +98,8 @@ class SessionMeta:
     summarized_turns: int = 0  # conversation messages folded into summary
     turns: int = 0  # answered questions
     settings: dict[str, Any] = field(default_factory=dict)
+    clinical_assessment: dict[str, Any] = field(default_factory=dict)
+    clinician_updates: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict) -> "SessionMeta":
@@ -176,6 +178,8 @@ class Session:
                 handle.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
             with open(self.terminal_log_path, "a", encoding="utf-8") as handle:
                 handle.write(_render_terminal_line(event))
+            if kind in {"user", "assistant", "analysis", "diagnostic_update"}:
+                self.save()  # semantic activity survives coarse filesystem timestamps
         return event
 
     def events(self) -> Iterator[dict]:
@@ -233,7 +237,7 @@ class Session:
             self.save()
 
     def next_run_number(self) -> int:
-        return len(self.meta.analyses) + 1
+        return max((a.run for a in self.meta.analyses), default=0) + 1
 
 
 def _kind_for(path: Path) -> str:
@@ -282,6 +286,19 @@ class SessionStore:
             )
         return session
 
+    def open_named(self, name: str | None = None) -> tuple[Session, bool]:
+        """Reopen an exact patient name; legacy duplicates use the latest activity.
+
+        Explicit ``create`` (the /new command) still creates a new conversation.
+        Partial-name matching is intentionally reserved for explicit /resume.
+        """
+        name = (name or "").strip()
+        if name:
+            hits = [s for s in self.list() if s.name.casefold() == name.casefold()]
+            if hits:
+                return hits[0], True
+        return self.create(name or None), False
+
     def open(self, folder: Path) -> Session:
         meta = SessionMeta.from_dict(json.loads((folder / "session.json").read_text(encoding="utf-8")))
         session = Session(folder, meta)
@@ -298,7 +315,16 @@ class SessionStore:
                     sessions.append(self.open(folder))
                 except (OSError, ValueError, TypeError):
                     continue
-        return sorted(sessions, key=lambda s: s.meta.updated_at, reverse=True)
+        def activity(session):
+            paths = (session.folder / "session.json", session.transcript_path)
+            modified = max((p.stat().st_mtime_ns for p in paths if p.exists()), default=0)
+            try:
+                recorded = int(datetime.fromisoformat(session.meta.updated_at).timestamp() * 1_000_000_000)
+            except ValueError:
+                recorded = 0
+            return max(modified, recorded), session.meta.updated_at, session.id
+
+        return sorted(sessions, key=activity, reverse=True)
 
     def find(self, query: str) -> Session | None:
         """Match by exact id, id prefix, exact name, or unique name substring."""

@@ -94,6 +94,11 @@ class ModelConfig:
 
     # Hosted text LLM (Groq) used for planning, summarisation and synthesis.
     text_llm: str = os.environ.get("MAOS_TEXT_LLM", "openai/gpt-oss-120b")
+    fast_text_llm: str = os.environ.get("MAOS_FAST_TEXT_LLM", "openai/gpt-oss-20b").strip()
+    text_llm_fallback: str = os.environ.get("MAOS_TEXT_LLM_FALLBACK", "").strip()
+    # BART is a summarizer, not a chat-completion model. Keep it out of the
+    # clinical JSON-generation fallback path.
+    hf_text_llm: str = os.environ.get("MAOS_HF_TEXT_LLM", "Qwen/Qwen2.5-7B-Instruct")
 
 
 MODELS = ModelConfig()
@@ -130,6 +135,8 @@ class RuntimeConfig:
     # Retry policy for transient network/model errors.
     max_retries: int = _env_int("MAOS_MAX_RETRIES", 3)
     retry_base_delay: float = _env_float("MAOS_RETRY_BASE_DELAY", 1.0)
+    max_replans: int = min(32, max(0, _env_int("MAOS_MAX_REPLANS", 4)))
+    max_added_nodes: int = min(64, max(0, _env_int("MAOS_MAX_ADDED_NODES", 8)))
 
     # Batch size for classifier passes over a study folder.
     batch_size: int = _env_int("MAOS_BATCH_SIZE", 8)
@@ -146,6 +153,7 @@ class RuntimeConfig:
 
     # Explicit extraction budgets; exceeding one must produce a warning.
     max_file_mb: int = max(1, _env_int("MAOS_MAX_FILE_MB", 100))
+    max_dicom_decoded_mb: int = max(1, _env_int("MAOS_MAX_DICOM_DECODED_MB", 512))
     max_document_pages: int = max(1, _env_int("MAOS_MAX_DOCUMENT_PAGES", 200))
     max_document_chars: int = max(1000, _env_int("MAOS_MAX_DOCUMENT_CHARS", 2000000))
     document_chunk_chars: int = max(1000, _env_int("MAOS_DOCUMENT_CHUNK_CHARS", 8000))
@@ -245,6 +253,9 @@ def describe() -> dict:
         "max_images_per_study": RUNTIME.max_images_per_study,
         "max_resident_models": RUNTIME.max_resident_models,
         "max_file_mb": RUNTIME.max_file_mb,
+        "max_dicom_decoded_mb": RUNTIME.max_dicom_decoded_mb,
+        "max_replans": RUNTIME.max_replans,
+        "max_added_nodes": RUNTIME.max_added_nodes,
         "max_document_pages": RUNTIME.max_document_pages,
         "max_document_chars": RUNTIME.max_document_chars,
         "document_chunk_chars": RUNTIME.document_chunk_chars,

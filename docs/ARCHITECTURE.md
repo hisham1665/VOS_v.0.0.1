@@ -1,5 +1,11 @@
 # Architecture
 
+The [AOS implementation audit](AOS_IMPROVEMENTS.md) documents capability DNA,
+performance-aware selection, bounded adaptation and longitudinal differential
+memory added on `feature/aos-patient-continuity`.
+Structured task contracts, bounded runtime DAG patches and direct-image series/
+coverage handling are documented in [ADAPTIVE_IMAGING.md](ADAPTIVE_IMAGING.md).
+
 ## The shape of the problem
 
 A clinician hands over a folder. Inside is whatever their PACS exported: a
@@ -15,7 +21,7 @@ That shapes three decisions that run through the whole system:
    makes the system unauditable. `agents/planner.py` builds it directly.
 2. **Two model families, deliberately.** A generative VLM writes fluent prose
    about findings it may not have seen. A supervised classifier returns a
-   calibrated probability over a fixed label set but cannot describe anything.
+   model score over a fixed label set but cannot describe anything.
    Running both and reconciling them is what makes a disagreement *visible*.
 3. **Partial failure must still produce a report.** One unreadable image cannot
    cost the other eleven. Failure is contained per node, and the report says
@@ -33,15 +39,16 @@ main.py / pipeline.py          entry points, CLI, stage sequencing
 ├── agents/                    orchestration          (no model calls except planner)
 │   ├── planner.py             deterministic DAG construction
 │   ├── manager_agent.py       LLM planner for free-form jobs; plan rendering
-│   ├── graph_executor.py      wave-parallel execution, failure containment
+│   ├── graph_executor.py      dependency-ready parallel execution, failure containment
 │   ├── sub_agent.py           runs one node; timeout and error boundary
 │   └── integrator_agent.py    executed graph → RadiologyReport
 ├── capabilities/              the only layer that talks to models
-│   ├── registry.py            the CapabilityRequest → CapabilityResult contract
+│   ├── registry.py            capability DNA, discovery and request/result contract
+│   ├── text_catalog.py        live model profiles for task-aware selection
 │   ├── hf_backend.py          local/remote routing, model cache, GPU semaphore
 │   └── (seven capabilities)
 ├── reporting/report_builder.py  report → markdown + JSON
-├── core/                      errors, logging, retry, content-addressed cache
+├── core/                      errors, logging, retry, cache, generic routing, evidence evaluation
 └── models.py                  every type, pydantic, fully serialisable
 ```
 
@@ -56,12 +63,17 @@ flowchart TD
     A[Study folder] --> B[ingest: decode documents and images, de-identify, resize, cache]
     B --> C{plan}
     C --> D[triage: CLIP modality/body part]
-    C --> E[screen: ViT classifier probabilities]
-    D --> F[read: VLM, one node per image, parallel]
-    E --> F
+    D --> E[screen: modality-matched classifier scores]
+    E --> K[specialist confirmation]
+    K --> F[read: VLM, one node per image, parallel]
+    C --> L[read documents independently]
     F --> G[consolidate: merge, de-duplicate, reconcile]
+    L --> G
+    E --> G
+    K --> G
     G --> H[literature: differential context]
-    G --> I[report: impression + patient status]
+    G --> I[report: integrated differential + patient status]
+    M[prior differential and clinician updates] --> I
     H --> I
     I --> J[Markdown + JSON report]
 
@@ -87,16 +99,19 @@ Green runs locally, orange is a hosted model call, grey touches no model.
 | Literature | `web_search` | Text LLM + search | Differential and next-investigation context for the findings raised. |
 | Report | `report_synthesis` | Text LLM | Impression, triage level, recommended next steps. |
 
-## Why waves
+## Dependency-ready scheduling and recovery
 
-`graph_utils.build_waves` runs Kahn's algorithm and groups nodes by dependency
-depth. Everything in a wave is independent by construction, so it runs
-concurrently under one bounded pool.
+`graph_utils.build_waves` validates/renders the DAG. Runtime execution uses one
+bounded pool and starts each child when its own parents finish; there is no
+global wave barrier. Image quality precedes triage → screen → confirmation → read.
+Document branches run independently. Local server image calls serialize under
+the GPU-server limit, even when several graph nodes are ready.
 
-For a 6-image study: wave 0 is triage + screen (2 nodes), wave 1 is six reads
-in parallel, waves 2–4 are consolidation, literature, report. Six sequential
-VLM calls become one wall-clock call's worth of latency, bounded by
-`MAOS_MAX_WORKERS`.
+Capabilities can emit structured verification requirements. DNA matching selects
+a compatible verifier; a detached graph patch is validated before pending
+consumers are rewired. Failed checks preserve original evidence. An untried
+equivalent implementation can replace exhausted failed work. Completed/running
+nodes are immutable; added work is bounded and original/revised plans are retained.
 
 ## How data moves between nodes
 

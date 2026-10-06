@@ -101,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="delete cached preprocessed images and model outputs, then exit",
     )
     parser.add_argument(
-        "--chat", action="store_true", help="open the interactive chat TUI (new session)"
+        "--chat", action="store_true", help="open the interactive chat TUI (reopens an existing --name)"
     )
     parser.add_argument(
         "--resume",
@@ -110,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="ID_OR_NAME",
         help="open the chat TUI on a saved session (no value: choose from a list)",
     )
-    parser.add_argument("--name", metavar="NAME", help="name for a new chat session")
+    parser.add_argument("--name", metavar="NAME", help="patient session name to reopen or create")
     parser.add_argument(
         "--sessions", action="store_true", help="list saved chat sessions and exit"
     )

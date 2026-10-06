@@ -1,5 +1,35 @@
 # Performance and tuning
 
+## Patient-continuity update (2026-10-05)
+
+The archived document-only disease runs have a different bottleneck from the
+image study below: consolidation and reporting frequently take 40–60 seconds
+each. See [the run analysis](TEST_RUN_ANALYSIS.md) for the actual per-case times.
+
+Changes now in the critical path:
+- Document-only consolidation deduplicates validated observations in code.
+- Extraction defaults to Groq `openai/gpt-oss-20b`; clinical reasoning uses the
+  stronger configured primary. Both IDs were verified against this account's
+  model listing. Set `MAOS_FAST_TEXT_LLM=` to disable the fast profile.
+- An upload plus question reuses the report for its answer, removing a duplicate
+  reasoning call. Older conversation folding remains conditional on its budget.
+- Extracted pages are cached independently of changing questions/graph positions.
+- Validated reports are cached on evidence, patient context, prior differential,
+  prompt and model-catalog configuration.
+- Independently ready graph children start without waiting for slow unrelated
+  roots; parallel work remains bounded by `MAOS_MAX_WORKERS`.
+- Groq SDK retries are disabled so the explicit retry policy owns the retry count.
+
+A live **two-document synthetic** study completed in **6.49 seconds**: extraction
+1.07/1.36s in parallel, deterministic consolidation 0.00s, integrated reasoning
+5.13s. An unchanged cached rerun completed in **0.14 seconds** wall clock. These
+are smoke-test timings for that fixture, not speed measurements for the larger
+archived cases or a benchmark against another product.
+
+Model selection uses local latency/reliability aggregates and a short failed-
+endpoint cooldown. Endpoint load, rate limits and model downloads still affect
+latency. Actual pricing is used only when configured in a model profile.
+
 ## Where the time goes
 
 For a 6-image chest study with the default configuration:

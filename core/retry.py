@@ -54,6 +54,9 @@ def with_retry(
     last: BaseException | None = None
     for attempt in range(1, attempts + 1):
         try:
+            from core.execution_context import call_deadline, remaining_time
+            if call_deadline.get() is not None:
+                remaining_time(float("inf"))
             return fn()
         except BaseException as exc:  # noqa: BLE001 - re-raised below
             last = exc
@@ -61,6 +64,9 @@ def with_retry(
                 raise
             delay = base_delay * (2 ** (attempt - 1))
             delay += random.uniform(0, base_delay * 0.5)
+            if call_deadline.get() is not None:
+                if delay >= remaining_time(float("inf")):
+                    raise TimeoutError("capability deadline leaves no time for another retry") from exc
             _log.warning(
                 "%s failed (attempt %d/%d): %s -- retrying in %.1fs",
                 label,

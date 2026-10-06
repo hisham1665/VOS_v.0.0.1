@@ -27,6 +27,43 @@ from pydantic import BaseModel, Field
 NodeStatus = Literal["pending", "running", "done", "failed", "skipped"]
 
 
+class TaskBudget(BaseModel):
+    """Hard execution limits; unknown model prices cannot satisfy a cost cap."""
+
+    max_replans: int = Field(default=4, ge=0, le=32)
+    max_added_nodes: int = Field(default=8, ge=0, le=64)
+    max_attempts_per_node: int = Field(default=2, ge=1, le=8)
+    max_elapsed_s: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_cost: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    max_memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+
+class TaskEvidence(BaseModel):
+    source_id: str
+    kind: str
+    available: bool = True
+    limitations: list[str] = Field(default_factory=list)
+
+
+class AcceptanceCriterion(BaseModel):
+    id: str
+    requirement: str
+    output_keys: list[str] = Field(default_factory=list)
+    source_ids: list[str] = Field(default_factory=list)
+    coverage_keys: list[str] = Field(default_factory=list)
+
+
+class TaskUnderstanding(BaseModel):
+    """Normalized task contract shared by fixed and free-form planners."""
+
+    intent: str
+    evidence: list[TaskEvidence] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    required_skills: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[AcceptanceCriterion] = Field(default_factory=list)
+    budget: TaskBudget = Field(default_factory=TaskBudget)
+
+
 class Node(BaseModel):
     """One unit of work in the task graph."""
 
@@ -34,6 +71,8 @@ class Node(BaseModel):
     description: str
     capability: str
     depends_on: list[str] = Field(default_factory=list)
+    # Wait for these checks, but retain usable original evidence if they fail.
+    optional_dependencies: list[str] = Field(default_factory=list)
     # Best-effort joins may use successful parents even if another failed.
     allow_partial: bool = False
     # With allow_partial, at least one of *these* parents must have succeeded.
@@ -61,6 +100,10 @@ class Graph(BaseModel):
     job: str
     nodes: list[Node] = Field(default_factory=list)
     deterministic: bool = False
+    task: TaskUnderstanding | None = None
+    original_plan: list[dict[str, Any]] = Field(default_factory=list)
+    revisions: list[dict[str, Any]] = Field(default_factory=list)
+    acceptance_results: list[dict[str, Any]] = Field(default_factory=list)
 
     def by_id(self) -> dict[str, Node]:
         return {n.id: n for n in self.nodes}
@@ -121,12 +164,17 @@ class StudyImage(BaseModel):
     source_path: str
     prepared_path: Optional[str] = None  # cached, resized, model-ready JPEG
     content_hash: str
+    prepared_hash: Optional[str] = None
     modality: Modality = Modality.UNKNOWN
     body_part: Optional[str] = None
     view: Optional[str] = None  # e.g. "PA", "AP", "lateral"
     width: int = 0
     height: int = 0
     is_dicom: bool = False
+    series_id: Optional[str] = None
+    frame_index: Optional[int] = None  # zero-based index in a multi-frame object
+    series_order: Optional[int] = None
+    quality: dict[str, Any] = Field(default_factory=dict)
     # DICOM header fields, already de-identified when MAOS_DEIDENTIFY is on.
     metadata: dict[str, Any] = Field(default_factory=dict)
     # Non-fatal problems: unreadable frame, missing header, downsampled, ...
@@ -136,6 +184,11 @@ class StudyImage(BaseModel):
     def path_for_model(self) -> str:
         """Prefer the preprocessed copy; fall back to the original."""
         return self.prepared_path or self.source_path
+
+    @property
+    def model_input_hash(self) -> str:
+        """Bind inference caches to actual prepared pixels, not just source bytes."""
+        return self.prepared_hash or self.content_hash
 
 
 class DocumentPage(BaseModel):
@@ -171,6 +224,23 @@ class PatientContext(BaseModel):
     prior_studies: list[str] = Field(default_factory=list)
     # Any .txt/.json/.md notes found alongside the images.
     notes: list[str] = Field(default_factory=list)
+    prior_assessment: dict[str, Any] = Field(default_factory=dict)
+    clinician_updates: dict[str, str] = Field(default_factory=dict)
+
+
+class StudySeries(BaseModel):
+    """Acquired series context; supplied files do not prove acquisition completeness."""
+
+    series_id: str
+    study_uid: Optional[str] = None
+    modality: Modality = Modality.UNKNOWN
+    body_part: Optional[str] = None
+    description: str = ""
+    image_ids: list[str] = Field(default_factory=list)
+    acquired_count: int = 0
+    ordering: str = "unspecified"
+    coverage: Literal["unknown", "partial"] = "unknown"
+    warnings: list[str] = Field(default_factory=list)
 
 
 class Study(BaseModel):
@@ -180,6 +250,7 @@ class Study(BaseModel):
     source_dir: str
     images: list[StudyImage] = Field(default_factory=list)
     documents: list[StudyDocument] = Field(default_factory=list)
+    series: list[StudySeries] = Field(default_factory=list)
     patient: PatientContext = Field(default_factory=PatientContext)
     loaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     skipped_files: list[str] = Field(default_factory=list)
@@ -205,6 +276,7 @@ class Finding(BaseModel):
     document_ids: list[str] = Field(default_factory=list)
     source_refs: list[str] = Field(default_factory=list)  # e.g. labs.pdf#page=2
     source: str = "vlm"  # vlm | document_analysis | classifier | literature | manual
+    evidence_kind: str = "unspecified"  # direct_image | document | mixed
     body_part: Optional[str] = None
 
 
@@ -216,6 +288,41 @@ class PatientStatus(BaseModel):
     triage: str = "routine"  # immediate | urgent | routine
     red_flags: list[str] = Field(default_factory=list)
     recommended_actions: list[str] = Field(default_factory=list)
+
+
+class EvidenceLink(BaseModel):
+    """A clinical argument bound to actual input sources, not a probability."""
+
+    detail: str
+    source_refs: list[str] = Field(default_factory=list)
+
+
+class SuggestedTest(BaseModel):
+    test: str
+    purpose: str
+    interpretation: str = ""  # how the result would change this differential
+
+
+class DiagnosticHypothesis(BaseModel):
+    condition: str
+    status: Literal["possible", "likely", "less_likely", "ruled_out", "confirmed"] = "possible"
+    rationale: str = ""
+    supporting_evidence: list[EvidenceLink] = Field(default_factory=list)
+    opposing_evidence: list[EvidenceLink] = Field(default_factory=list)
+    missing_information: list[str] = Field(default_factory=list)
+    suggested_tests: list[SuggestedTest] = Field(default_factory=list)
+    exclusion_reason: str = ""
+    # Bound by the evaluator, not the model. Distinguishes truly new results
+    # from old supporting evidence recited again after an exclusion.
+    considered_sources: list[str] = Field(default_factory=list)
+
+
+class ClinicalAssessment(BaseModel):
+    integrated_summary: str = ""
+    differential: list[DiagnosticHypothesis] = Field(default_factory=list)
+    unresolved_questions: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    validation_issues: list[str] = Field(default_factory=list)
 
 
 class RadiologyReport(BaseModel):
@@ -230,12 +337,22 @@ class RadiologyReport(BaseModel):
     source_reads: dict[str, str] = Field(default_factory=dict)
     document_types: dict[str, str] = Field(default_factory=dict)
     input_manifest: list[dict[str, Any]] = Field(default_factory=list)
+    image_reads: dict[str, str] = Field(default_factory=dict)
+    image_quality: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    series: list[StudySeries] = Field(default_factory=list)
+    evaluation_groups: list[dict[str, Any]] = Field(default_factory=list)
+    verification: list[dict[str, Any]] = Field(default_factory=list)
+    task_understanding: TaskUnderstanding | None = None
+    plan_revisions: list[dict[str, Any]] = Field(default_factory=list)
+    original_plan: list[dict[str, Any]] = Field(default_factory=list)
+    acceptance_results: list[dict[str, Any]] = Field(default_factory=list)
 
     indication: str = ""
     technique: str = ""
     findings: list[Finding] = Field(default_factory=list)
     impression: str = ""
     status: PatientStatus = Field(default_factory=PatientStatus)
+    clinical_assessment: ClinicalAssessment = Field(default_factory=ClinicalAssessment)
     references: list[str] = Field(default_factory=list)
     # Per-image screening cascade: {image_id: {modality, region, status, reason,
     # models, abnormal_score, candidates, confirmations}}.

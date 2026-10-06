@@ -61,7 +61,9 @@ def run(request: CapabilityRequest) -> CapabilityResult:
     # "brain_tumor: unverifiable".
     named: set[tuple[str, str]] = set()
     for image_id, entry in screening.items():
-        if image_id not in images or entry.get("status") != "screened":
+        if image_id not in images:
+            continue
+        if entry.get("status") != "screened" and not (requested and entry.get("routing_eligible")):
             continue
         targets: dict[str, list[str]] = {}
         for candidate in entry.get("candidates", []):
@@ -72,6 +74,7 @@ def run(request: CapabilityRequest) -> CapabilityResult:
                 )
         for target in requested:
             targets.setdefault(target, []).append("named in referring question/history")
+            named.add((image_id, target))
         if targets:
             plan[image_id] = targets
 
@@ -166,6 +169,9 @@ def run(request: CapabilityRequest) -> CapabilityResult:
         text=_render(confirmation, errors),
         artifacts={
             "confirmation": confirmation,
+            "_models_used": {f"specialist:{r['model']}": r["model_id"]
+                             for records in confirmation.values() for r in records
+                             if r.get("verdict") != "unverifiable" and r.get("model_id")},
             "flagged": flagged,
             **({"confirm_errors": errors} if errors else {}),
         },

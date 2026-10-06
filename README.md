@@ -30,6 +30,8 @@ Seven stages, run as a parallel task graph:
 1. **Ingest** — walk the folder, decode DICOM (rescale LUT, windowing), strip
    PHI, resize, cache, and extract bounded pages/chunks from PDF, TXT/MD,
    CSV/TSV, JSON, DOCX and XLSX. Unreadable files are recorded, never fatal.
+   Multi-frame DICOMs retain every decodable frame; series geometry, quality and
+   sampling limitations are preserved through cache hits.
 2. **Triage** — a general CLIP gate rejects non-medical images; PubMedCLIP
    identifies modality (X-ray / CT / MRI / ultrasound / …) and body region.
    DICOM headers are authoritative; filename hints are a prior CLIP can overrule.
@@ -48,7 +50,14 @@ Seven stages, run as a parallel task graph:
    reconcile disagreements, and surface specialist-supported candidates the
    VLM missed.
 7. **Report** — impression, patient status, triage level, next steps, and a
-   per-image screening-cascade table.
+    per-image screening-cascade table, separate direct-image/report provenance
+    and modality/body-region coverage counts.
+
+Task contracts record intent, evidence, missing inputs, acceptance criteria and
+budgets. Incomplete extraction, changed repeated observations or unsupported
+arguments can insert bounded, DNA-selected verification work before downstream
+reasoning. Original plans and runtime revisions remain auditable:
+[adaptive verification and imaging](docs/ADAPTIVE_IMAGING.md).
 
 See [docs/SCREENING_CASCADE.md](docs/SCREENING_CASCADE.md) for the model
 roster, benchmark numbers and — importantly — where it breaks.
@@ -71,7 +80,7 @@ prints to the terminal.
 ### Interactive chat
 
 ```bash
-python main.py --chat --name patient-001   # full-screen chat; attach with @path or drag & drop
+python main.py --chat --name patient-001   # reopen this patient, or create if first visit
 python main.py --resume                    # pick up any earlier session
 ```
 
@@ -80,6 +89,13 @@ everything uploaded and said in the session. Each session lives in
 `sessions/<name>_<id>/` with its uploads, reports, memory, a JSONL transcript
 and a terminal log. Design and memory strategy:
 [docs/CHAT_TUI.md](docs/CHAT_TUI.md).
+
+The final assessment connects history, laboratory findings and imaging reports
+into a source-linked differential, with evidence for/against each possibility
+and targeted tests. Follow-up results update the same patient memory; documented
+exclusions are retained rather than proposed again on the next question.
+Use `/differential` to inspect that state, and `/new <name>` for an explicitly
+new conversation. See [the AOS implementation audit](docs/AOS_IMPROVEMENTS.md).
 
 ### CLI
 
@@ -94,7 +110,7 @@ and a terminal log. Design and memory strategy:
 | `--doctor` | Environment preflight, then exit |
 | `--clear-cache` | Drop cached images and model outputs |
 | `--ask PROMPT` | Free-form job through the LLM planner instead of the fixed plan |
-| `--chat` / `--name NAME` | Open the chat TUI on a new (named) session |
+| `--chat` / `--name NAME` | Reopen an exact named patient session, or create it |
 | `--resume [ID]` | Open the chat TUI on a saved session (picker without ID) |
 | `--sessions` | List saved chat sessions |
 | `--verbose` | Per-stage timing logs |
@@ -124,6 +140,9 @@ series; `0` (the default) reads all image files.
 
 Everything is an environment variable; see [.env.example](.env.example) for the
 full list. The defaults target a small laptop GPU.
+For this RTX 2050 (4GB), the recommended sub-8B medical vision setup is
+**MedGemma 1.5 4B Q4_K_M plus its vision projector**, served by llama.cpp with
+CPU/GPU offload. Exact files, commands and limits: [local model setup](docs/MODELS.md#local-vision-model-below-8b-rtx-2050--4gb).
 
 ```bash
 HF_TOKEN=hf_...              # hosted model inference
@@ -147,6 +166,7 @@ report, study, graph = analyze_study(
     "./studies/patient-001",
     clinical_history="54M, cough and fever",
     referring_question="rule out pneumonia",
+    task_budget={"max_replans": 4, "max_added_nodes": 8, "max_elapsed_s": 600},
 )
 
 print(report.status.overall_severity)   # Severity.HIGH
@@ -161,6 +181,13 @@ Every stage is separately callable — `load_study`, `build_radiology_plan`,
 `GraphExecutor().run`, `IntegratorAgent().integrate`, `write_report` — so a
 service can cache ingest, or a test can drive the executor with a hand-built
 graph.
+
+Evaluate operational coverage separately for direct images and written reports:
+
+```bash
+python evaluate_images.py --reports outputs/reports/example.json
+python evaluate_images.py --studies ./cases/chest-xray ./cases/head-ct
+```
 
 ## Where things live
 
@@ -195,6 +222,9 @@ the worst finding.
 | [MODELS.md](docs/MODELS.md) | The model roster, routing, swapping checkpoints |
 | [PERFORMANCE.md](docs/PERFORMANCE.md) | Where time goes, measured optimisations, tuning by hardware |
 | [SAFETY.md](docs/SAFETY.md) | Clinical safeguards, privacy, deployment checklist |
+| [AOS_IMPROVEMENTS.md](docs/AOS_IMPROVEMENTS.md) | 20-component AOS audit, longitudinal reasoning, changes and roadmap |
+| [TEST_RUN_ANALYSIS.md](docs/TEST_RUN_ANALYSIS.md) | Analysis of all indexed disease runs, failure causes and timing evidence |
+| [AGENT_CONTEXT_REVIEW.md](docs/AGENT_CONTEXT_REVIEW.md) | Relevant Claude/OpenCode/Omnirush project history recovered for this work |
 
 ## Requirements
 

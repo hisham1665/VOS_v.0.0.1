@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from pathlib import Path
 
 from config import MODELS, RUNTIME
@@ -43,8 +44,11 @@ from models import Modality
 _log = get_logger("vision")
 
 OLLAMA_URL = os.environ.get("MAOS_OLLAMA_URL", "http://localhost:11434/v1")
-OLLAMA_MODEL = os.environ.get("MAOS_OLLAMA_MODEL", "medgemma1.5:latest")
-VLM_BACKEND = os.environ.get("MAOS_VLM_BACKEND", "auto").lower()  # auto|ollama|hf|local
+OLLAMA_MODEL = os.environ.get("MAOS_OLLAMA_MODEL", "gemma3:4b")
+VLM_BACKEND = os.environ.get("MAOS_VLM_BACKEND", "auto").lower()  # auto|ollama|openai|hf|local
+VLM_URL = os.environ.get("MAOS_VLM_URL", "http://localhost:8080/v1")
+VLM_MODEL = os.environ.get("MAOS_VLM_MODEL", "medgemma-1.5-4b")
+_SERVER_GATE = threading.BoundedSemaphore(max(1, RUNTIME.max_gpu_workers))
 
 _SYSTEM_PROMPT = (
     "You are an experienced radiologist producing a structured preliminary read "
@@ -69,7 +73,10 @@ MODALITY AND VIEW: the imaging modality, projection/view, and body region.
 IMAGE QUALITY: whether the study is diagnostic, and any limitation.
 OBSERVATIONS: each distinct finding on its own line, in the form
   - <finding>: <location> | <severity: critical|high|moderate|low|normal> | <confidence: high|medium|low>
-  Use "- No acute abnormality: n/a | normal | high" when the study looks normal.
+   Use "- No acute abnormality: n/a | normal | high" only if the supplied image
+   is interpretable and shows none. A single frame cannot establish a normal
+   complete CT/MRI study. For limited/blank/non-medical images, state that no
+   reliable assessment is possible; never substitute a normal finding.
 IMPRESSION: two or three sentences summarising the clinical significance.
 """
 
@@ -93,6 +100,11 @@ def run(request: CapabilityRequest) -> CapabilityResult:
 
     for image in images:
         try:
+            quality = (request.artifacts.get("image_quality") or {}).get(image.image_id) or image.quality
+            if quality.get("status") == "unusable":
+                raise ValueError("Uniform/blank pixel data; image was not interpreted")
+            if image.image_id in set(request.artifacts.get("non_medical", [])):
+                raise ValueError("Excluded by non-medical image gate; image was not interpreted")
             text, model_id = _read_image(image, request)
             reads[image.image_id] = text
             models_used.add(model_id)
@@ -117,7 +129,10 @@ def run(request: CapabilityRequest) -> CapabilityResult:
         artifacts={
             "reads": reads,
             "read_errors": errors,
+            "image_quality": {image.image_id: ((request.artifacts.get("image_quality") or {}).get(image.image_id) or image.quality)
+                              for image in images},
             "vlm_models": sorted(models_used),
+            "_models_used": {"vision": ", ".join(sorted(models_used))},
         },
     )
 
@@ -126,13 +141,17 @@ def _read_image(image, request: CapabilityRequest) -> tuple[str, str]:
     """Return ``(read_text, model_id)`` for one image, using the cache."""
     prompt = _build_prompt(image, request)
     route = _select_route()
-    key = cache.make_key("vlm", route, _route_model(route), image.content_hash, prompt)
+    key = cache.make_key("vlm-v2", route, _route_model(route),
+                         OLLAMA_URL if route == "ollama" else None,
+                         _SYSTEM_PROMPT, image.model_input_hash, prompt)
 
     cached = cache.read_json("vision", key)
     if cached:
         _log.info("cache hit for read of %s", image.image_id)
         record_model("vision", cached["model"])
         return cached["text"], cached["model"]
+    from core.execution_context import remaining_time
+    remaining_time(RUNTIME.call_timeout)
 
     with timed(_log, f"VLM read of {image.image_id} via {route}"):
         text, model_id = _dispatch(route, Path(image.path_for_model), prompt)
@@ -155,9 +174,19 @@ def _build_prompt(image, request: CapabilityRequest) -> str:
         context_lines.append(f"Body region: {image.body_part}")
     if image.view:
         context_lines.append(f"View: {image.view}")
+    if image.series_id:
+        context_lines.append(f"Source series: {image.series_id}; ordered frame position: {image.series_order}; source frame index: {image.frame_index}")
+    quality = (request.artifacts.get("image_quality") or {}).get(image.image_id) or image.quality
+    if quality:
+        context_lines.append("Technical quality check (not diagnostic adequacy): " + str(quality))
 
     study = request.study
     if study is not None:
+        series = next((s for s in study.series if s.series_id == image.series_id), None)
+        if series:
+            context_lines.append(f"This is one 2D image/frame from {len(series.image_ids)}/{series.acquired_count} supplied decoded frames; acquisition completeness {series.coverage}.")
+            context_lines.extend(series.warnings)
+            context_lines.append("Other frames are not supplied to this call. Do not claim to have reviewed the complete volume or compare unseen slices.")
         patient = study.patient
         details = [
             f"age {patient.age}" if patient.age else "",
@@ -204,13 +233,19 @@ def _cascade_context(image, artifacts: dict) -> list[str]:
 
     screening = (artifacts.get("screening") or {}).get(image.image_id)
     if not screening:
+        for record in (artifacts.get("confirmation") or {}).get(image.image_id, []):
+            if record.get("verdict") != "unverifiable":
+                lines.append(f"Narrow specialist re-check (no broad screener): {record['target']} {record['verdict']} ({record['model']}, {record['probability']:.0%}); not a diagnosis.")
         return lines
     if screening.get("status") != "screened":
         lines.append(
             f"No supervised screening model was run on this image "
             f"({screening.get('reason', 'not covered')}). Your read is the only "
-            "interpretation; be explicit about uncertainty."
+            "narrative interpretation; be explicit about uncertainty."
         )
+        for record in (artifacts.get("confirmation") or {}).get(image.image_id, []):
+            if record.get("verdict") != "unverifiable":
+                lines.append(f"Narrow specialist re-check (no broad screener): {record['target']} {record['verdict']} ({record['model']}, {record['probability']:.0%}); not a diagnosis.")
         return lines
 
     candidates = screening.get("candidates") or []
@@ -245,7 +280,7 @@ def _cascade_context(image, artifacts: dict) -> list[str]:
 
 def _select_route() -> str:
     """Choose ollama / hf / local for this run."""
-    if VLM_BACKEND in {"ollama", "hf", "local"}:
+    if VLM_BACKEND in {"ollama", "openai", "hf", "local"}:
         return VLM_BACKEND
     if _ollama_reachable():
         return "ollama"
@@ -258,18 +293,23 @@ def _select_route() -> str:
 
 
 def _route_model(route: str) -> str:
+    if route == "openai":
+        return f"{VLM_MODEL}@{VLM_URL.rstrip('/')}"
     return OLLAMA_MODEL if route == "ollama" else MODELS.report_vlm
 
 
 def _dispatch(route: str, image_path: Path, prompt: str) -> tuple[str, str]:
     if route == "ollama":
         return _read_ollama(image_path, prompt)
+    if route == "openai":
+        return _read_openai_server(image_path, prompt, url=VLM_URL, model=VLM_MODEL, label="openai-compatible")
     if route == "local":
         return _read_local(image_path, prompt)
     return remote_vlm(image_path, prompt, system=_SYSTEM_PROMPT)
 
 
 _ollama_checked: bool | None = None
+_ollama_checked_at = 0.0
 _ollama_lock = threading.Lock()
 
 
@@ -281,16 +321,17 @@ def _ollama_reachable() -> bool:
     result is memoised.
     """
     global _ollama_checked
-    if _ollama_checked is not None:
+    ttl = 30.0 if _ollama_checked else 5.0
+    if _ollama_checked is not None and time.monotonic() - _ollama_checked_at < ttl:
         return _ollama_checked
     with _ollama_lock:
-        if _ollama_checked is not None:
+        if _ollama_checked is not None and time.monotonic() - _ollama_checked_at < ttl:
             return _ollama_checked
         return _probe_ollama()
 
 
 def _probe_ollama() -> bool:
-    global _ollama_checked
+    global _ollama_checked, _ollama_checked_at
     try:
         import requests
 
@@ -306,24 +347,36 @@ def _probe_ollama() -> bool:
                     OLLAMA_MODEL,
                     sorted(tags)[:5],
                 )
+            else:
+                model_response = requests.post(f"{base}/api/show", json={"model": OLLAMA_MODEL}, timeout=1.5)
+                available = model_response.ok and "vision" in model_response.json().get("capabilities", [])
     except Exception:  # noqa: BLE001 - absence is the normal case
         available = False
     _ollama_checked = available
+    _ollama_checked_at = time.monotonic()
     return available
 
 
 def _read_ollama(image_path: Path, prompt: str) -> tuple[str, str]:
+    return _read_openai_server(image_path, prompt, url=OLLAMA_URL, model=OLLAMA_MODEL, label="ollama")
+
+
+def _read_openai_server(image_path: Path, prompt: str, *, url: str, model: str, label: str) -> tuple[str, str]:
     from openai import OpenAI
 
     from core.retry import with_retry
     from ingest.preprocess import image_data_url
 
-    client = OpenAI(base_url=OLLAMA_URL, api_key="ollama", timeout=RUNTIME.call_timeout)
+    client = OpenAI(base_url=url, api_key="local", timeout=RUNTIME.call_timeout, max_retries=0)
     data_url = image_data_url(image_path)
 
     def _call() -> str:
-        completion = client.chat.completions.create(
-            model=OLLAMA_MODEL,
+        from core.execution_context import call_deadline, remaining_time
+        timeout = remaining_time(RUNTIME.call_timeout)
+        if call_deadline.get() is not None:
+            timeout -= min(0.5, timeout / 10)  # leave time to preserve partial reads
+        completion = client.with_options(timeout=timeout).chat.completions.create(
+            model=model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
                 {
@@ -339,13 +392,44 @@ def _read_ollama(image_path: Path, prompt: str) -> tuple[str, str]:
         )
         return (completion.choices[0].message.content or "").strip()
 
-    text = with_retry(
-        _call,
-        attempts=RUNTIME.max_retries,
-        base_delay=RUNTIME.retry_base_delay,
-        label=f"ollama:{OLLAMA_MODEL}",
-    )
-    return text, f"{OLLAMA_MODEL} (ollama)"
+    # The small GPU is shared by all local-server nodes. Queue one image call
+    # at a time instead of asking a 4GB card to hold several contexts at once.
+    from core.execution_context import remaining_time
+    if not _SERVER_GATE.acquire(timeout=remaining_time(RUNTIME.call_timeout)):
+        raise TimeoutError("local vision concurrency queue exceeded capability deadline")
+    try:
+        text = with_retry(_call, attempts=RUNTIME.max_retries, base_delay=RUNTIME.retry_base_delay,
+                          label=f"{label}:{model}")
+    finally:
+        _SERVER_GATE.release()
+    return text, f"{model} ({label})"
+
+
+def local_server_info() -> dict:
+    """Inspect configured model metadata without sending patient pixels."""
+    import requests
+
+    if VLM_BACKEND == "openai":
+        try:
+            response = requests.get(VLM_URL.rstrip("/") + "/models", timeout=2)
+            response.raise_for_status()
+            ids = {entry.get("id") for entry in response.json().get("data", [])}
+            return {"backend": "openai", "url": VLM_URL, "model": VLM_MODEL,
+                    "reachable": VLM_MODEL in ids, "vision_verified": False,
+                    "detail": "Model listed; projector/image inference must be smoke-tested separately"}
+        except Exception as exc:
+            return {"backend": "openai", "reachable": False, "model": VLM_MODEL, "detail": str(exc)}
+    base = OLLAMA_URL.rstrip("/").removesuffix("/v1")
+    try:
+        response = requests.post(f"{base}/api/show", json={"model": OLLAMA_MODEL}, timeout=2)
+        response.raise_for_status()
+        payload = response.json()
+        capabilities = payload.get("capabilities", [])
+        return {"backend": "ollama", "model": OLLAMA_MODEL, "reachable": True,
+                "vision_verified": "vision" in capabilities, "capabilities": capabilities,
+                "details": payload.get("details", {})}
+    except Exception as exc:
+        return {"backend": "ollama", "model": OLLAMA_MODEL, "reachable": False, "detail": str(exc)}
 
 
 def _read_local(image_path: Path, prompt: str) -> tuple[str, str]:

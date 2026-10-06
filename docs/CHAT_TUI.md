@@ -6,7 +6,7 @@ come back to the same conversation later.
 
 ```bash
 python main.py --chat                     # new session
-python main.py --chat --name patient-001  # new, named session
+python main.py --chat --name patient-001  # reopen this patient; create on first visit
 python main.py --resume                   # pick a saved session from a list
 python main.py --resume 3f9a2c            # resume by id (or unique name)
 python main.py --sessions                 # list saved sessions, no UI
@@ -59,6 +59,22 @@ hash, so re-analysis after adding one file only pays for the new file plus
 the consolidation step. A file already in the session (same content) is
 skipped.
 
+Named startup reopens the exact patient name. If older versions created several
+sessions with that name, the most recently active is opened; `/sessions` and
+`/resume <id>` allow choosing a specific older conversation.
+
+The final response connects laboratory, imaging and history evidence into a
+differential. Each hypothesis includes supporting/opposing sources, unresolved
+information and tests that would distinguish alternatives. The state persists
+in `session.json` independently of the rolling conversation summary.
+
+An explicit clinician statement such as `bacterial pneumonia ruled out after
+specialist assessment` is bound to an unambiguous existing hypothesis and saved
+even if the text endpoint fails. A negative result alone does not automatically
+establish exclusion. Supply the test report and its interpretation to update
+support for a hypothesis. `re-analyze` / `analyze ... again` also invokes a new
+analysis; `/analyze` is the explicit command.
+
 ### Commands
 
 | Command | |
@@ -70,6 +86,7 @@ skipped.
 | `/files` | Uploaded files |
 | `/report [n]` | Full report of the latest (or *n*-th) run |
 | `/memory` | Rolling summary + what is indexed |
+| `/differential` | Persistent hypotheses, exclusions, evidence and suggested tests |
 | `/literature on\|off` | Web literature lookup during analysis (off by default — slow) |
 | `/sessions` | Saved sessions |
 | `/resume [id\|name]` | Switch session (picker without argument) |

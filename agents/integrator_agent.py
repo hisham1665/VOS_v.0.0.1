@@ -14,9 +14,10 @@ from __future__ import annotations
 import time
 
 from core.logging_utils import get_logger
-from capabilities.hf_backend import models_used
+from graph_utils import build_waves
 from models import (
     DISCLAIMER,
+    ClinicalAssessment,
     Finding,
     Graph,
     PatientStatus,
@@ -43,12 +44,24 @@ class IntegratorAgent:
             modalities=study.modalities,
             image_count=len(study.images),
             document_count=len(study.documents),
-            models_used=models_used(),
             input_manifest=self._input_manifest(study),
+            series=study.series,
+            task_understanding=graph.task,
+            plan_revisions=graph.revisions,
+            original_plan=graph.original_plan,
+            acceptance_results=graph.acceptance_results,
         )
 
         # --- gather artifacts across every successful node -----------------
         merged = self._merge_artifacts(graph)
+        # Use this run's node outputs, never the backend's process-global last
+        # model map (which can contain checkpoints from another patient/run).
+        used: dict[str, set[str]] = {}
+        for node in graph.nodes:
+            for capability, model in (node.artifacts.get("_models_used") or {}).items():
+                if model:
+                    used.setdefault(capability, set()).update(str(model).split(", "))
+        report.models_used = {key: ", ".join(sorted(value)) for key, value in used.items()}
 
         report.findings = self._build_findings(merged.get("findings", []))
         report.references = [str(r) for r in merged.get("references", [])][:12]
@@ -58,8 +71,20 @@ class IntegratorAgent:
         report.document_types = {
             str(key): str(value) for key, value in (merged.get("document_types", {}) or {}).items()
         }
+        report.image_reads = {str(k): str(v) for k, v in (merged.get("reads") or {}).items()}
+        report.image_quality = merged.get("image_quality") or {}
+        report.verification = self._unique_records(merged.get("verification") or [])
+        for entry in report.input_manifest:
+            if entry["kind"] == "image":
+                entry["analysed"] = entry["id"] in report.image_reads
+                entry["read_status"] = "read" if entry["analysed"] else "unavailable"
+            elif entry["kind"] == "document":
+                entry["analysed_pages"] = [ref for ref in report.source_reads if ref.startswith(entry["id"] + "#page=")]
+                entry["analysed"] = bool(entry["analysed_pages"])
 
         report.screening = self._build_screening(merged)
+        from core.image_evaluation import evaluation_groups
+        report.evaluation_groups = evaluation_groups(report, study)
 
         report.indication = (
             merged.get("indication")
@@ -70,10 +95,23 @@ class IntegratorAgent:
         report.technique = merged.get("technique") or self._describe_technique(study)
         report.impression = merged.get("impression") or self._fallback_impression(graph, report)
         report.status = self._build_status(merged.get("status"), report.findings)
+        if study.images and len(report.image_reads) < len(study.images) and report.status.overall_severity == Severity.NORMAL:
+            report.status.overall_severity = Severity.INDETERMINATE
+            report.status.summary += " Image interpretation is incomplete; a normal imaging study cannot be established."
+        report.clinical_assessment = ClinicalAssessment.model_validate(
+            merged.get("clinical_assessment") or study.patient.prior_assessment or {}
+        )
+        if not merged.get("clinical_assessment") and study.patient.prior_assessment:
+            report.clinical_assessment.limitations.append("Prior differential retained; current reasoning did not complete.")
 
         # --- provenance and degradation -----------------------------------
         failed = [n for n in graph.nodes if n.status in {"failed", "skipped"}]
-        report.degraded = bool(failed)
+        report.degraded = bool(failed or merged.get("synthesis_error") or merged.get("read_errors") or merged.get("degraded_reads")
+                               or report.clinical_assessment.validation_issues
+                               or any(row.get("status") == "unmet" for row in report.acceptance_results)
+                               or any(row.get("status") != "applied" for row in graph.revisions)
+                               or any(row.get("status") in {"limited", "unavailable"} or row.get("issues") for row in report.verification)
+                               or (study.images and len(report.image_reads) < len(study.images)))
         report.node_trace = [
             {
                 "id": node.id,
@@ -82,6 +120,9 @@ class IntegratorAgent:
                 "duration_s": node.duration_s,
                 "error": node.error,
                 "output_chars": len(node.output or ""),
+                "selected_capability": node.artifacts.get("_selected_capability", node.capability),
+                "selection": node.artifacts.get("_selection", {}),
+                "model_selection": node.artifacts.get("_model_selection", {}),
             }
             for node in graph.nodes
         ]
@@ -95,6 +136,18 @@ class IntegratorAgent:
                     report.warnings.append(
                         f"Document {document.document_id} page {page.page_number}: {warning}"
                     )
+        for series in study.series:
+            report.warnings.extend(f"Series {series.series_id} -- {warning}" for warning in series.warnings)
+        for image in study.images:
+            report.warnings.extend(f"Image {image.image_id} -- {warning}" for warning in image.warnings)
+        for record in report.verification:
+            report.warnings.extend(f"Verification ({record.get('kind')}) -- {issue}" for issue in record.get("issues", []))
+        for revision in graph.revisions:
+            if revision.get("status") != "applied":
+                report.warnings.append(f"Additional {revision['kind']} {revision['status']}: {revision['reason']}")
+        for row in report.acceptance_results:
+            if row.get("status") == "unmet":
+                report.warnings.append(f"Task criterion unmet ({row['id']}): outputs {row['missing_outputs']}, sources {row['missing_sources']}")
         for item in study.skipped_files:
             report.warnings.append(f"File not analysed -- {item}")
         for node in failed:
@@ -102,7 +155,10 @@ class IntegratorAgent:
                 f"Pipeline stage '{node.id}' ({node.capability}) {node.status}: "
                 f"{node.error or 'no detail'}"
             )
-        for issue in merged.get("quality_issues", []):
+        quality = merged.get("quality_issues", [])
+        if isinstance(quality, dict):
+            quality = [quality]
+        for issue in quality:
             if isinstance(issue, dict):
                 for source_ref, details in issue.items():
                     values = details if isinstance(details, list) else [details]
@@ -110,6 +166,11 @@ class IntegratorAgent:
                         report.warnings.append(f"Document quality ({source_ref}) -- {detail}")
             else:
                 report.warnings.append(f"Image quality -- {issue}")
+        for ref, error in (merged.get("read_errors") or {}).items():
+            report.warnings.append(f"Read unavailable ({ref}) -- {error}")
+        if merged.get("synthesis_error"):
+            report.warnings.append(f"Reasoning degraded -- {merged['synthesis_error']}")
+        report.warnings.extend(report.clinical_assessment.validation_issues)
         for error in merged.get("screen_errors", []) + merged.get("confirm_errors", []):
             report.warnings.append(f"Screening model unavailable -- {error}")
         for discrepancy in merged.get("discrepancies", []):
@@ -141,12 +202,14 @@ class IntegratorAgent:
     def _merge_artifacts(self, graph: Graph) -> dict:
         """Collect artifacts from completed nodes, latest stage winning.
 
-        Nodes are walked in graph order, so a later stage (the report node)
+        Nodes are walked in dependency order, so a later stage (the report node)
         overrides an earlier one (consolidation) for scalar keys, while list
         keys accumulate.
         """
         merged: dict = {}
-        for node in graph.nodes:
+        # Runtime nodes are appended after original sinks. Traverse the actual
+        # dependency order so a late verification cannot overwrite a report.
+        for node in [n for wave in build_waves(graph) for n in wave]:
             if node.status != "done":
                 continue
             for key, value in node.artifacts.items():
@@ -202,6 +265,9 @@ class IntegratorAgent:
                     document_ids=[str(i) for i in entry.get("document_ids", [])],
                     source_refs=[str(i) for i in entry.get("source_refs", [])],
                     source=str(entry.get("source", "vlm")),
+                    evidence_kind=("mixed" if entry.get("image_ids") and entry.get("source_refs") else
+                                   "direct_image" if entry.get("image_ids") else
+                                   "document" if entry.get("source_refs") else "unspecified"),
                     body_part=entry.get("body_part"),
                 )
             )
@@ -237,6 +303,13 @@ class IntegratorAgent:
                 "kind": "image",
                 "format": "dicom" if image.is_dicom else image.source_path.rsplit(".", 1)[-1].lower(),
                 "analysed": True,
+                "evidence_kind": "direct_image",
+                "modality": image.modality.value,
+                "body_part": image.body_part,
+                "series_id": image.series_id,
+                "frame_index": image.frame_index,
+                "series_order": image.series_order,
+                "model_input_hash": image.model_input_hash,
             })
         for document in study.documents:
             manifest.append({
@@ -250,6 +323,18 @@ class IntegratorAgent:
         for skipped in study.skipped_files:
             manifest.append({"kind": "skipped", "detail": skipped, "analysed": False})
         return manifest
+
+    @staticmethod
+    def _unique_records(records):
+        import json
+
+        out, seen = [], set()
+        for record in records:
+            key = json.dumps(record, sort_keys=True, default=str)
+            if key not in seen:
+                out.append(record)
+                seen.add(key)
+        return out
 
     def _build_status(self, raw_status, findings: list[Finding]) -> PatientStatus:
         # No findings means we learned nothing, not that the patient is well.
@@ -286,10 +371,15 @@ class IntegratorAgent:
         # urgent than the worst finding.
         severity = max_severity([severity, computed])
 
+        triage = str(raw_status.get("triage", "routine")).lower()
+        required = "immediate" if severity is Severity.CRITICAL else "urgent" if severity is Severity.HIGH else "routine"
+        rank = {"routine": 0, "urgent": 1, "immediate": 2}
+        if triage not in rank or rank[triage] < rank[required]:
+            triage = required
         return PatientStatus(
             overall_severity=severity,
             summary=str(raw_status.get("summary", "")).strip(),
-            triage=str(raw_status.get("triage", "routine")).lower(),
+            triage=triage,
             red_flags=[str(f) for f in raw_status.get("red_flags", [])],
             recommended_actions=[
                 str(a) for a in raw_status.get("recommended_actions", [])

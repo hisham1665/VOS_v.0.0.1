@@ -76,11 +76,15 @@ def run(request: CapabilityRequest) -> CapabilityResult:
             "models": [],
             "abnormal_score": None,
             "candidates": [],
+            "routing_eligible": False,
         }
         screening[img.image_id] = entry
 
         confidence = info.get("confidence")
-        if img.image_id in non_medical:
+        quality = (artifacts.get("image_quality") or {}).get(img.image_id) or img.quality
+        if quality.get("status") == "unusable":
+            entry["reason"] = "unusable/blank pixel data; supervised screening not run"
+        elif img.image_id in non_medical:
             entry["reason"] = "not a medical image"
         elif img.modality == Modality.UNKNOWN:
             entry["reason"] = "modality could not be identified"
@@ -90,7 +94,9 @@ def run(request: CapabilityRequest) -> CapabilityResult:
                 "route to a disease model"
             )
         else:
+            entry["routing_eligible"] = True
             models = model_zoo.screeners_for(img.modality, region)
+            entry["screeners_available"] = [model.key for model in models]
             if not models:
                 entry["reason"] = (
                     f"no supervised screener in the model zoo covers "
@@ -174,6 +180,8 @@ def run(request: CapabilityRequest) -> CapabilityResult:
             "classification": raw_scores,
             "flagged": flagged,
             "requested_conditions": requested,
+            "_models_used": {f"classifier:{key}": model_zoo.ZOO[key].model_id
+                             for scores in raw_scores.values() for key in scores if key in model_zoo.ZOO},
             **({"screen_errors": errors} if errors else {}),
         },
     )
@@ -365,7 +373,7 @@ def _normalise(labels) -> list[dict]:
 
 
 def _cache_key(model: ZooModel, img) -> str:
-    return cache.make_key("cls", model.model_id, img.content_hash)
+    return cache.make_key("cls-v2", model.model_id, img.model_input_hash)
 
 
 def _cached(model: ZooModel, img) -> list[dict] | None:

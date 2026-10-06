@@ -1,7 +1,7 @@
 """Full-screen chat UI for Medical AOS, built on Textual.
 
     python main.py --chat                    # new session
-    python main.py --chat --name patient-001 # new, named session
+    python main.py --chat --name patient-001 # reopen or create patient session
     python main.py --resume                  # pick a saved session
     python main.py --resume a1b2c3           # resume by id (or name)
 
@@ -47,7 +47,7 @@ WELCOME = """\
 """
 
 _COMMANDS = [
-    "/help", "/attach ", "/analyze", "/history ", "/files", "/report", "/memory",
+    "/help", "/attach ", "/analyze", "/history ", "/files", "/report", "/memory", "/differential",
     "/literature on", "/literature off", "/sessions", "/resume ", "/new ", "/rename ",
     "/clear", "/quit",
 ]
@@ -213,7 +213,8 @@ class MedicalAOSApp(App):
             else:
                 self._open_session(found, replay=True)
         else:
-            self._open_session(self.store.create(self._name), replay=False)
+            session, resumed = self.store.open_named(self._name)
+            self._open_session(session, replay=resumed)
         self._q("#prompt", Input).focus()
 
     # ------------------------------------------------------------ sessions
@@ -413,6 +414,10 @@ class MedicalAOSApp(App):
         side.append("Memory\n", style="bold underline")
         side.append(f"{len(self.engine.memory.chunks)} indexed chunk(s)\n")
         side.append(f"{meta.turns} Q&A turn(s), {meta.summarized_turns} folded\n")
+        hypotheses = meta.clinical_assessment.get("differential", [])
+        if hypotheses:
+            excluded = sum(h.get("status") == "ruled_out" for h in hypotheses)
+            side.append(f"{len(hypotheses) - excluded} active, {excluded} ruled out — /differential\n")
         side.append("\nFiles\n", style="bold underline")
         if not meta.files:
             side.append("none yet — @path to attach\n", style="dim")

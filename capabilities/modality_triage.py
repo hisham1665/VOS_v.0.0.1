@@ -118,7 +118,11 @@ def run(request: CapabilityRequest) -> CapabilityResult:
     warnings: list[str] = []
 
     try:
-        clip = _classify(images)
+        from capabilities.image_classification import _region_from_text
+
+        targets = [img for img in images if img.quality.get("status") != "unusable"
+                   and not (img.is_dicom and img.modality != Modality.UNKNOWN and _region_from_text(img.body_part))]
+        clip = _classify(targets) if targets else {}
     except Exception as exc:  # noqa: BLE001 - triage is best-effort
         _log.warning("CLIP triage unavailable (%s); using header/filename only", exc)
         clip = {}
@@ -163,7 +167,8 @@ def run(request: CapabilityRequest) -> CapabilityResult:
 
     return CapabilityResult(
         text="\n".join(lines),
-        artifacts={"triage": per_image, "non_medical": non_medical},
+        artifacts={"triage": per_image, "non_medical": non_medical,
+                   "_models_used": {"modality_triage": MODELS.modality_clip} if clip else {}},
     )
 
 
@@ -261,7 +266,7 @@ def _classify(images: list) -> dict[str, dict]:
 
 def _cache_key(img) -> str:
     return cache.make_key(
-        "triage-v2", MODELS.modality_clip, MODELS.nonmedical_clip, img.content_hash
+        "triage-v3", MODELS.modality_clip, MODELS.nonmedical_clip, img.model_input_hash
     )
 
 

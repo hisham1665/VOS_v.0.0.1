@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from config import RUNTIME
 from core.logging_utils import get_logger
-from models import Graph, Node, Study
+from core.task_understanding import bind_plan, understand_task
+from models import AcceptanceCriterion, Graph, Node, Study, TaskBudget, TaskEvidence
 
 _log = get_logger("planner")
 
@@ -29,7 +30,7 @@ _MAX_VISION_NODES = 12
 _MAX_DOCUMENT_NODES = 24
 
 
-def build_radiology_plan(study: Study, *, with_literature: bool = True) -> Graph:
+def build_radiology_plan(study: Study, *, with_literature: bool = True, budget: TaskBudget | None = None) -> Graph:
     """Return the fixed plan for reading ``study``."""
     nodes: list[Node] = []
 
@@ -42,8 +43,10 @@ def build_radiology_plan(study: Study, *, with_literature: bool = True) -> Graph
     cascade_ids: list[str] = []
 
     if all_image_ids:
-        image_root_ids = ["triage", "screen", "confirm"]
+        image_root_ids = ["quality", "triage", "screen", "confirm"]
         cascade_ids = ["screen", "confirm"]
+        nodes.append(Node(id="quality", description="Check technical pixel quality and supplied series/frame coverage",
+                          capability="image_quality", artifacts={"image_ids": all_image_ids}))
         nodes.append(
             Node(
                 id="triage",
@@ -52,7 +55,7 @@ def build_radiology_plan(study: Study, *, with_literature: bool = True) -> Graph
                     "and flag any file that is not a medical image."
                 ),
                 capability="modality_triage",
-                depends_on=[],
+                depends_on=["quality"],
                 artifacts={"image_ids": all_image_ids},
             )
         )
@@ -82,7 +85,7 @@ def build_radiology_plan(study: Study, *, with_literature: bool = True) -> Graph
         )
 
     # --- Wave 1: one vision-language read per image (or per group) --------
-    groups = _group_images(all_image_ids)
+    groups = _group_images(all_image_ids, study=study)
     read_ids: list[str] = []
     for index, group in enumerate(groups):
         node_id = f"read{index}"
@@ -166,7 +169,26 @@ def build_radiology_plan(study: Study, *, with_literature: bool = True) -> Graph
         len(read_ids),
         ", with literature lookup" if with_literature else "",
     )
-    return Graph(job=job, nodes=nodes, deterministic=True)
+    evidence = [TaskEvidence(source_id=image.image_id, kind="direct_image", limitations=image.warnings)
+                for image in study.images]
+    evidence += [TaskEvidence(source_id=f"{doc.document_id}#page={page.page_number}", kind="document_page",
+                              available=bool(page.text.strip() or page.image_path), limitations=page.warnings)
+                 for doc in study.documents for page in doc.pages]
+    missing = list(study.warnings)
+    if not study.patient.clinical_history:
+        missing.append("Clinical history was not supplied")
+    if study.patient.prior_studies:
+        missing.append("Named prior studies are context only unless their images/reports are supplied")
+    graph = Graph(job=job, nodes=nodes, deterministic=True,
+                  task=understand_task(job, evidence=evidence, missing_evidence=missing, budget=budget,
+                                      acceptance_criteria=[
+                                          AcceptanceCriterion(id="source_coverage", requirement="Read every assigned image and document page",
+                                                              source_ids=[item.source_id for item in evidence], coverage_keys=["reads", "document_reads"]),
+                                          AcceptanceCriterion(id="assessment", requirement="Produce a structured source-linked clinical assessment",
+                                                              output_keys=["clinical_assessment", "status"]),
+                                      ]))
+    bind_plan(graph)
+    return graph
 
 
 def _document_nodes(study: Study) -> list[Node]:
@@ -215,13 +237,28 @@ def _document_nodes(study: Study) -> list[Node]:
     return nodes
 
 
-def _group_images(image_ids: list[str]) -> list[list[str]]:
+def _group_images(image_ids: list[str], *, study: Study | None = None) -> list[list[str]]:
     """One node per image, up to a ceiling; beyond that, batch evenly."""
     if not image_ids:
         return []
     if len(image_ids) <= _MAX_VISION_NODES:
         return [[image_id] for image_id in image_ids]
 
+    if study and study.series and len(study.series) <= _MAX_VISION_NODES:
+        # Preserve acquisition boundaries when batching large studies. Reserve
+        # at least one node for every represented series before splitting it.
+        series_groups = [[i for i in s.image_ids if i in set(image_ids)] for s in study.series]
+        series_groups = [group for group in series_groups if group]
+        assigned = {i for group in series_groups for i in group}
+        if assigned == set(image_ids):
+            while len(series_groups) < _MAX_VISION_NODES:
+                largest = max(range(len(series_groups)), key=lambda i: len(series_groups[i]))
+                group = series_groups[largest]
+                if len(group) < 2:
+                    break
+                middle = len(group) // 2
+                series_groups[largest:largest + 1] = [group[:middle], group[middle:]]
+            return series_groups
     # Round up so no group is left over.
     per_group = -(-len(image_ids) // _MAX_VISION_NODES)
     return [
@@ -248,11 +285,12 @@ def estimate_cost(graph: Graph) -> dict:
     counts: dict[str, int] = {}
     for node in graph.nodes:
         counts[node.capability] = counts.get(node.capability, 0) + 1
+    document_only = bool(counts.get("document_analysis")) and not counts.get("vision")
     return {
         "nodes": len(graph.nodes),
         "vlm_calls": counts.get("vision", 0),
         "text_llm_calls": (
-            counts.get("cross_image_synthesis", 0)
+            (0 if document_only else counts.get("cross_image_synthesis", 0))
             + counts.get("report_synthesis", 0)
             + counts.get("summarization", 0)
             + counts.get("web_search", 0)

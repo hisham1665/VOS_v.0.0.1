@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from core.errors import UnknownCapabilityError
+from core.routing import CapabilityDNA, TaskRequirements, performance_history, rank_candidates
 from models import Study, StudyImage
 
 
@@ -77,14 +78,35 @@ class Capability(Protocol):
 
 _REGISTRY: dict[str, Capability] = {}
 _DESCRIPTIONS: dict[str, str] = {}
+_DNA: dict[str, CapabilityDNA] = {}
+_REGISTRY_LOCK = threading.RLock()
+
+_BUILTIN_CONTRACTS = {
+    "modality_triage": (("identify_modality",), ("images",), ("triage",)),
+    "image_classification": (("screen_images",), ("images", "triage"), ("screening",)),
+    "specialist_confirmation": (("confirm_candidates",), ("images", "screening"), ("confirmation",)),
+    "vision": (("read_images",), ("images",), ("reads",)),
+    "document_analysis": (("extract_documents",), ("documents",), ("document_reads", "findings")),
+    "cross_image_synthesis": (("reconcile_observations",), ("text",), ("findings",)),
+    "report_synthesis": (("clinical_reasoning",), ("text", "findings"), ("clinical_assessment", "status")),
+    "summarization": (("summarize",), ("text",), ("text",)),
+    "web_search": (("search_literature",), ("text",), ("references",)),
+}
 
 
-def register(name: str, description: str) -> Callable[[Capability], Capability]:
+def register(name: str, description: str, *, dna: CapabilityDNA | None = None) -> Callable[[Capability], Capability]:
     """Decorator that adds a function to the capability registry."""
 
     def decorator(fn: Capability) -> Capability:
-        _REGISTRY[name] = fn
-        _DESCRIPTIONS[name] = description
+        skills, inputs, outputs = _BUILTIN_CONTRACTS.get(name, ((name,), ("text",), ("text",)))
+        contract = dna or CapabilityDNA(name=name, skills=skills, inputs=inputs, outputs=outputs,
+                                        domain="medical" if name in _BUILTIN_CONTRACTS else "general")
+        if contract.name != name:
+            raise ValueError("DNA name must match registered capability name")
+        with _REGISTRY_LOCK:
+            _REGISTRY[name] = fn
+            _DESCRIPTIONS[name] = description
+            _DNA[name] = contract
         return fn
 
     return decorator
@@ -109,6 +131,33 @@ def names() -> list[str]:
 def describe() -> dict[str, str]:
     _ensure_loaded()
     return dict(_DESCRIPTIONS)
+
+
+def metadata() -> dict[str, dict]:
+    _ensure_loaded()
+    with _REGISTRY_LOCK:
+        return {name: _contract(name).to_dict() for name in _REGISTRY}
+
+
+def _contract(name: str) -> CapabilityDNA:
+    # Keep adapters which register a callable directly backward compatible.
+    return _DNA.get(name) or CapabilityDNA(name=name, skills=(name,))
+
+
+def requirements(name: str) -> TaskRequirements:
+    _ensure_loaded()
+    get(name)  # raises the established useful error for unknown names
+    dna = _contract(name)
+    return TaskRequirements(skills=dna.skills, inputs=dna.inputs, outputs=dna.outputs)
+
+
+def select(task: TaskRequirements, *, preferred: str | None = None,
+           excluded: set[str] | None = None) -> tuple[list[str], list[dict]]:
+    _ensure_loaded()
+    with _REGISTRY_LOCK:
+        candidates = [_contract(name) for name in _REGISTRY]
+    ranked, trace = rank_candidates(candidates, task, performance_history(), preferred=preferred, excluded=excluded)
+    return [dna.name for dna in ranked], trace
 
 
 def is_registered(name: str) -> bool:
@@ -141,11 +190,13 @@ def _ensure_loaded() -> None:
             cross_image_synthesis,
             document_analysis,
             image_classification,
+            image_quality,
             modality_triage,
             report_synthesis,
             specialist_confirmation,
             summarization,
             vision,
+            verification,
             web_search,
         )
 
@@ -155,6 +206,7 @@ def _ensure_loaded() -> None:
 # Capabilities that consume images directly. The planner uses this to decide
 # which nodes need an ``image_ids`` assignment.
 IMAGE_CAPABILITIES = {
+    "image_quality",
     "vision",
     "image_classification",
     "modality_triage",

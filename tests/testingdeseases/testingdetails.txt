@@ -1,0 +1,45 @@
+rib fracture : 
+history : - high chest pain
+plan :- ribfracture.md
+report : - ribfracture1.md
+
+lung cancer :
+history :- breathing trouble and bleeding through nose
+plan :- lungcancer.md
+report :- lungcancer1.md
+
+liver cirrhosis :
+history :- History
+feeling extremely fatigued and nauseous, and skin and eyes looking yellow, along with painful swelling in my belly and legs.
+plan :- liverdesease.md
+report :- liverdesease1.md
+
+kidney failure :
+history :-feeling extremely exhausted, ankles and feet are swollen, trouble catching  breath
+plan :-kidneyfailure.md
+report :- kidneyfailure1.md
+
+hernia :
+history :- a soft lump in groin/lower belly. It pops out when  stand up or lift something heavy, but goes away when lie flat on  back
+plan :- hernia.md
+report :- hernia1.md
+
+fatty liver:
+history :- feeling a dull ache, a heavy sensation, or mild fullness right under the  ribs on the upper right side of the stomach
+plan :- fattyliver.md
+report:- fattyliver1.md
+
+brain tumour:
+history :- have a dull, heavy pressure in  head that wakes  up every morning. It hurts worse when  cough, strain, or lie flat, and  usual pain pills do not touch it
+plan :- braintumour.md
+report :- braintumour1.md
+
+bronchitis:
+history :-  persistent cough that brings up mucus, accompanied by chest tightness and fatigue
+plan :- bronchitis.md
+report :- bronchitis1.md
+
+stroke:
+history :- sudden confusing physical changes in plain
+plan :- stroke.md
+report :- stroke1.md

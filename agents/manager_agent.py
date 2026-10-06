@@ -24,14 +24,14 @@ from pathlib import Path
 from typing import Optional
 
 from capabilities import registry
-from capabilities.hf_backend import chat_text, groq_client
-from config import MODELS, RUNTIME
+from capabilities.hf_backend import chat_text
+from config import RUNTIME
 from core.errors import PlanningError
 from core.logging_utils import get_logger
-from core.retry import with_retry
+from core.task_understanding import bind_plan, understand_task
 from diagram_utils import build_mermaid
 from graph_utils import GraphValidationError, build_waves, validate_graph
-from models import Graph, Study
+from models import Graph, Study, TaskBudget, TaskEvidence
 
 _log = get_logger("manager")
 
@@ -39,10 +39,11 @@ _log = get_logger("manager")
 def _system_prompt() -> str:
     """Built at call time so it always reflects the live capability registry."""
     capability_lines = "\n".join(
-        f"- {name}: {description}" for name, description in sorted(registry.describe().items())
+        f"- {name}: {description}; DNA={json.dumps(registry.metadata()[name])}"
+        for name, description in sorted(registry.describe().items())
     )
     return f"""\
-You are a task planner for a medical imaging analysis system. Decompose the \
+You are a task planner using a capability registry. Decompose the \
 user's job into a directed acyclic graph (DAG) of tasks.
 
 Available capabilities -- you may use ONLY these names:
@@ -62,12 +63,14 @@ MERGING: a node may depend on several parents and receives all their outputs.
 
 IMAGE WORK: capabilities {sorted(registry.IMAGE_CAPABILITIES)} operate on the
 study's images. Give each image its own node when the images should be read
-independently; the system assigns images to those nodes.
+independently; assign the exact supplied ids in artifacts.image_ids.
+For document_analysis, assign exact ids in artifacts.document_ids.
 
-ORDERING RULE: a report_synthesis node must be the single final node, and must
-depend on whatever produced the findings.
+ORDERING RULE: for clinical study reports, report_synthesis is the final node
+and depends on the findings. For jobs in other domains, choose an appropriate
+registered capability for the deliverable; do not force a medical report.
 
-Call the create_graph function. Do not reply with plain text."""
+Return ONLY a JSON object with "job" and "nodes". Do not use code fences or prose."""
 
 
 _CREATE_GRAPH_TOOL = {
@@ -104,10 +107,17 @@ class ManagerAgent:
 
     MAX_REPAIRS = 1
 
-    def create_plan(self, user_prompt: str, study: Optional[Study] = None) -> Graph:
+    def create_plan(self, user_prompt: str, study: Optional[Study] = None, *, budget: TaskBudget | None = None) -> Graph:
         _log.info("decomposing job into a task graph")
 
+        evidence = ([TaskEvidence(source_id=i.image_id, kind="direct_image", limitations=i.warnings) for i in study.images]
+                    + [TaskEvidence(source_id=f"{d.document_id}#page={p.page_number}", kind="document_page",
+                                    available=bool(p.text or p.image_path), limitations=p.warnings)
+                       for d in study.documents for p in d.pages]) if study else []
+        task = understand_task(user_prompt, evidence=evidence, budget=budget,
+                               missing_evidence=list(study.warnings) if study else [])
         messages = self._build_messages(user_prompt, study)
+        messages[1]["content"] += "\nNORMALIZED TASK CONTRACT:\n" + task.model_dump_json()
         graph = self._call_planner(messages)
 
         # --- repair loop: structure first, then capability names ----------
@@ -131,7 +141,7 @@ class ManagerAgent:
                     "content": (
                         f"That graph is invalid: {problems}\n\n"
                         "Fix exactly these problems, keep everything else, and "
-                        "call create_graph again."
+                        "return the corrected graph JSON."
                     ),
                 },
             ]
@@ -143,6 +153,8 @@ class ManagerAgent:
                 _log.warning("completeness audit: %s -- continuing anyway", verdict)
 
         waves = build_waves(graph)
+        graph.task = task  # never accept model-invented resources/evidence/budgets
+        bind_plan(graph)
         _log.info("plan ready: %d node(s), %d wave(s)", len(graph.nodes), len(waves))
         return graph
 
@@ -165,29 +177,12 @@ class ManagerAgent:
         return "; ".join(issues)
 
     def _call_planner(self, messages: list) -> Graph:
-        def _call() -> dict:
-            response = groq_client().chat.completions.create(
-                model=MODELS.text_llm,
-                messages=messages,
-                tools=[_CREATE_GRAPH_TOOL],
-                tool_choice={"type": "function", "function": {"name": "create_graph"}},
-                temperature=0.2,
-            )
-            message = response.choices[0].message
-            if not message.tool_calls:
-                raise PlanningError(
-                    "planner did not call create_graph; "
-                    f"it replied: {(message.content or '')[:300]}"
-                )
-            return json.loads(message.tool_calls[0].function.arguments)
-
-        payload = with_retry(
-            _call,
-            attempts=RUNTIME.max_retries,
-            base_delay=RUNTIME.retry_base_delay,
-            label="planner",
+        raw, _ = chat_text(
+            json.dumps(messages[1:]), system=messages[0]["content"],
+            task="planning", json_mode=True, max_tokens=3000, temperature=0.1,
+            validator=lambda text: Graph.model_validate_json(text),
         )
-        return Graph.model_validate(payload)
+        return Graph.model_validate_json(raw)
 
     def _build_messages(self, user_prompt: str, study: Optional[Study]) -> list:
         text = user_prompt
@@ -199,7 +194,8 @@ class ManagerAgent:
             )
             text = (
                 f"{user_prompt}\n\n"
-                f"The study contains {len(study.images)} image(s):\n{summary}"
+                f"The study contains {len(study.images)} image(s):\n{summary}\n"
+                f"Documents: {[d.document_id for d in study.documents]}"
             )
         return [
             {"role": "system", "content": _system_prompt()},
@@ -264,6 +260,16 @@ class ManagerAgent:
             lines.extend(f"- `{n.id}` ({n.capability}): {n.error}" for n in failures)
 
         lines += ["", "## Graph", "", "```mermaid", build_mermaid(graph, waves), "```", ""]
+        if any(n.artifacts.get("_selection") for n in graph.nodes):
+            lines += ["## Selection and adaptation trace", "", "```json",
+                      json.dumps({n.id: n.artifacts["_selection"] for n in graph.nodes if n.artifacts.get("_selection")}, indent=2),
+                      "```", ""]
+        if graph.task:
+            lines += ["## Task understanding", "", "```json", graph.task.model_dump_json(indent=2), "```", ""]
+        if graph.revisions:
+            lines += ["## Original plan and runtime revisions", "", "```json",
+                      json.dumps({"original_plan": graph.original_plan, "revisions": graph.revisions,
+                                  "acceptance": graph.acceptance_results}, indent=2), "```", ""]
 
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)
