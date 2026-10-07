@@ -44,7 +44,9 @@ from models import Modality
 _log = get_logger("vision")
 
 OLLAMA_URL = os.environ.get("MAOS_OLLAMA_URL", "http://localhost:11434/v1")
-OLLAMA_MODEL = os.environ.get("MAOS_OLLAMA_MODEL", "gemma3:4b")
+_OLLAMA_MODEL_EXPLICIT = bool(os.environ.get("MAOS_OLLAMA_MODEL", "").strip())
+OLLAMA_MODEL = os.environ.get("MAOS_OLLAMA_MODEL", "").strip() or "medgemma1.5:latest"
+_DEFAULT_OLLAMA_MODELS = ("medgemma1.5:latest", "gemma3:4b")
 VLM_BACKEND = os.environ.get("MAOS_VLM_BACKEND", "auto").lower()  # auto|ollama|openai|hf|local
 VLM_URL = os.environ.get("MAOS_VLM_URL", "http://localhost:8080/v1")
 VLM_MODEL = os.environ.get("MAOS_VLM_MODEL", "medgemma-1.5-4b")
@@ -295,7 +297,7 @@ def _select_route() -> str:
 def _route_model(route: str) -> str:
     if route == "openai":
         return f"{VLM_MODEL}@{VLM_URL.rstrip('/')}"
-    return OLLAMA_MODEL if route == "ollama" else MODELS.report_vlm
+    return _selected_ollama_model() if route == "ollama" else MODELS.report_vlm
 
 
 def _dispatch(route: str, image_path: Path, prompt: str) -> tuple[str, str]:
@@ -311,6 +313,17 @@ def _dispatch(route: str, image_path: Path, prompt: str) -> tuple[str, str]:
 _ollama_checked: bool | None = None
 _ollama_checked_at = 0.0
 _ollama_lock = threading.Lock()
+_ollama_selected_model: str | None = None
+_ollama_details: dict = {}
+
+
+def _selected_ollama_model() -> str:
+    return _ollama_selected_model or OLLAMA_MODEL
+
+
+def _canonical_ollama_name(name: str) -> str:
+    """Ollama resolves an omitted tag as :latest."""
+    return name if ":" in name.rsplit("/", 1)[-1] else name + ":latest"
 
 
 def _ollama_reachable() -> bool:
@@ -331,34 +344,68 @@ def _ollama_reachable() -> bool:
 
 
 def _probe_ollama() -> bool:
-    global _ollama_checked, _ollama_checked_at
+    global _ollama_checked, _ollama_checked_at, _ollama_selected_model, _ollama_details
+    _ollama_selected_model = None
+    details = {"backend": "ollama", "url": OLLAMA_URL, "configured_model": OLLAMA_MODEL,
+               "model": OLLAMA_MODEL, "reachable": False, "server_reachable": False,
+               "vision_verified": False, "available_models": [], "attempts": []}
     try:
         import requests
 
         base = OLLAMA_URL.rstrip("/").removesuffix("/v1")
         response = requests.get(f"{base}/api/tags", timeout=1.5)
-        available = response.ok
-        if available:
-            tags = {m.get("name", "") for m in response.json().get("models", [])}
-            available = OLLAMA_MODEL in tags
-            if not available:
-                _log.info(
-                    "Ollama is up but %s is not pulled (have: %s)",
-                    OLLAMA_MODEL,
-                    sorted(tags)[:5],
-                )
-            else:
-                model_response = requests.post(f"{base}/api/show", json={"model": OLLAMA_MODEL}, timeout=1.5)
-                available = model_response.ok and "vision" in model_response.json().get("capabilities", [])
-    except Exception:  # noqa: BLE001 - absence is the normal case
-        available = False
-    _ollama_checked = available
+        if not response.ok:
+            raise RuntimeError(f"Ollama model listing returned HTTP {response.status_code}")
+        details["server_reachable"] = True
+        tags = {_canonical_ollama_name(m.get("name", "")): m.get("name", "")
+                for m in response.json().get("models", []) if m.get("name")}
+        details["available_models"] = sorted(tags.values())
+        # An explicit operator choice is never silently replaced. Without one,
+        # preserve the installed MedGemma setup and consider the documented
+        # Gemma baseline only after checking each model advertises vision.
+        candidates = [OLLAMA_MODEL] if _OLLAMA_MODEL_EXPLICIT else list(dict.fromkeys([OLLAMA_MODEL, *_DEFAULT_OLLAMA_MODELS]))
+        for candidate in candidates:
+            name = tags.get(_canonical_ollama_name(candidate))
+            if name is None:
+                details["attempts"].append({"model": candidate, "status": "not_installed"})
+                continue
+            try:
+                model_response = requests.post(f"{base}/api/show", json={"model": name}, timeout=2)
+                if not model_response.ok:
+                    raise RuntimeError(f"model inspection returned HTTP {model_response.status_code}")
+                payload = model_response.json()
+                capabilities = payload.get("capabilities", [])
+                if "vision" not in capabilities:
+                    details["attempts"].append({"model": name, "status": "no_vision", "capabilities": capabilities})
+                    continue
+                _ollama_selected_model = name
+                details.update(model=name, reachable=True, vision_verified=True,
+                               capabilities=capabilities, details=payload.get("details", {}),
+                               detail="Installed model advertises vision; actual inference is checked by image reads")
+                details["attempts"].append({"model": name, "status": "selected"})
+                _log.info("Ollama vision route selected installed model %s", name)
+                break
+            except Exception as exc:
+                details["attempts"].append({"model": name, "status": "inspection_failed", "error": str(exc)})
+        if not details["reachable"]:
+            details["detail"] = (f"No eligible installed vision model for {OLLAMA_MODEL}. "
+                                 "Set MAOS_OLLAMA_MODEL to an installed image-capable model. "
+                                 f"Installed: {', '.join(details['available_models']) or 'none'}")
+            _log.info(details["detail"])
+    except Exception as exc:  # absence is normal; retain an actionable reason
+        details["detail"] = f"Cannot reach Ollama at {OLLAMA_URL}: {exc}. Start Ollama and retry."
+    _ollama_details = details
+    _ollama_checked = details["reachable"]
     _ollama_checked_at = time.monotonic()
-    return available
+    return _ollama_checked
 
 
 def _read_ollama(image_path: Path, prompt: str) -> tuple[str, str]:
-    return _read_openai_server(image_path, prompt, url=OLLAMA_URL, model=OLLAMA_MODEL, label="ollama")
+    from core.errors import BackendError
+
+    if not _ollama_reachable():
+        raise BackendError(_ollama_details.get("detail", "Ollama vision model is unavailable"))
+    return _read_openai_server(image_path, prompt, url=OLLAMA_URL, model=_selected_ollama_model(), label="ollama")
 
 
 def _read_openai_server(image_path: Path, prompt: str, *, url: str, model: str, label: str) -> tuple[str, str]:
@@ -419,17 +466,8 @@ def local_server_info() -> dict:
                     "detail": "Model listed; projector/image inference must be smoke-tested separately"}
         except Exception as exc:
             return {"backend": "openai", "reachable": False, "model": VLM_MODEL, "detail": str(exc)}
-    base = OLLAMA_URL.rstrip("/").removesuffix("/v1")
-    try:
-        response = requests.post(f"{base}/api/show", json={"model": OLLAMA_MODEL}, timeout=2)
-        response.raise_for_status()
-        payload = response.json()
-        capabilities = payload.get("capabilities", [])
-        return {"backend": "ollama", "model": OLLAMA_MODEL, "reachable": True,
-                "vision_verified": "vision" in capabilities, "capabilities": capabilities,
-                "details": payload.get("details", {})}
-    except Exception as exc:
-        return {"backend": "ollama", "model": OLLAMA_MODEL, "reachable": False, "detail": str(exc)}
+    _ollama_reachable()
+    return dict(_ollama_details)
 
 
 def _read_local(image_path: Path, prompt: str) -> tuple[str, str]:

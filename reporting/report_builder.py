@@ -165,15 +165,16 @@ def render_markdown(report: RadiologyReport, study: Study | None = None) -> str:
                 lines.append("")
 
     if study is not None and study.images:
-        lines.append("## Images analysed")
+        lines.append("## Images supplied and read status")
         lines.append("")
-        lines.append("| Image | Modality | Region | Size | Source |")
-        lines.append("|---|---|---|---|---|")
+        lines.append("| Image | Modality | Region | Size | Source | Direct image read |")
+        lines.append("|---|---|---|---|---|---|")
         for image in study.images:
             lines.append(
                 f"| `{image.image_id}` | {image.modality.value} "
                 f"| {image.body_part or '-'} | {image.width}x{image.height} "
-                f"| {'DICOM' if image.is_dicom else Path(image.source_path).suffix.lstrip('.').upper()} |"
+                f"| {'DICOM' if image.is_dicom else Path(image.source_path).suffix.lstrip('.').upper()} "
+                f"| {'completed' if image.image_id in report.image_reads else '**unavailable** — see Run diagnostics'} |"
             )
         lines.append("")
 

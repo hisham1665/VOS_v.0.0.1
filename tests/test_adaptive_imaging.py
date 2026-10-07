@@ -365,6 +365,90 @@ def test_visual_verification_inspects_rendered_page_even_with_native_text(tmp_pa
     assert result.artifacts["verification"][0]["method"] == "rendered-page model reread"
 
 
+def test_visual_verification_keeps_unstructured_model_text_as_limited_review(tmp_path, monkeypatch):
+    from capabilities import document_analysis, vision
+    from capabilities.registry import CapabilityRequest
+    from capabilities.verification import verify_documents
+    from models import DocumentPage, Study, StudyDocument
+    from PIL import Image
+
+    path = tmp_path / "page.png"
+    Image.linear_gradient("L").save(path)
+    study = Study(study_id="s", source_dir=".", documents=[StudyDocument(
+        document_id="scan.pdf", source_path="scan.pdf", content_hash="h", format="pdf",
+        pages=[DocumentPage(page_number=1, text="Preliminary radiology page", image_path=str(path))]
+    )])
+    monkeypatch.setattr(vision, "_select_route", lambda: "openai")
+    monkeypatch.setattr(vision, "_dispatch", lambda *args: ("The image shows a limited radiology review; no structured JSON was returned.", "test-vlm"))
+    result = verify_documents(CapabilityRequest(instruction="verify", study=study))
+    record = result.artifacts["verification"][0]
+    assert record["status"] == "reviewed"
+    assert "unstructured text" in " ".join(record["issues"])
+    assert not result.artifacts["verification_document_reads"] or "scan.pdf#page=1" in result.artifacts["verification_document_reads"]
+
+
+def test_filename_hints_add_region_and_conservative_modality_for_teaching_images(tmp_path):
+    from ingest.study_loader import load_study
+    from models import Modality
+    from PIL import Image
+
+    cases = [("lowerlegfracture.png", Modality.XRAY, "limb"),
+             ("cholecystitis.webp", Modality.UNKNOWN, "abdomen"),
+             ("cataract.jpg", Modality.UNKNOWN, "eye"),
+             ("cardiac_mri.jpg", Modality.MRI, "heart")]
+    for filename, modality, body_part in cases:
+        path = tmp_path / filename
+        Image.linear_gradient("L").resize((256, 256)).save(path)
+        study = load_study(path)
+        assert study.images[0].modality is modality
+        assert study.images[0].body_part == body_part
+
+
+def test_document_analysis_drops_administrative_metadata_findings(monkeypatch):
+    from capabilities import document_analysis
+    from capabilities.registry import CapabilityRequest
+    from models import DocumentPage, Study, StudyDocument
+
+    payload = {"document_type": "lab_report", "findings": [
+        {"label": "Patient Information", "description": "Patient Example, 52 years", "severity": "normal"},
+        {"label": "Report Date", "description": "21 September 2026", "severity": "normal"},
+        {"label": "CRP", "description": "CRP 92 mg/L", "severity": "high"},
+    ], "quality_issues": []}
+    monkeypatch.setattr(document_analysis.hf_backend, "chat_text", lambda *a, **k: (json.dumps(payload), "test-model"))
+    study = Study(study_id="s", source_dir=".", documents=[StudyDocument(
+        document_id="lab.txt", source_path="lab.txt", content_hash="h", format="txt",
+        pages=[DocumentPage(page_number=1, text="Patient Information\nReport Date\nCRP 92 mg/L")]
+    )])
+    result = document_analysis.run(CapabilityRequest(instruction="read", study=study))
+    assert [finding["label"] for finding in result.artifacts["findings"]] == ["CRP"]
+
+
+def test_report_payload_normalizes_string_evidence_without_accepting_unlinked_claims():
+    from capabilities import report_synthesis
+
+    raw = json.dumps({"impression": "A source-linked observation requires review.", "clinical_assessment": {
+        "integrated_summary": "A source-linked observation requires review.",
+        "differential": [{"condition": "Possible condition", "status": "likely", "rationale": "Model rationale",
+                          "supporting_evidence": ["The model supplied this string without a citation"]}]
+    }})
+    report_synthesis._validate_payload(raw)
+    payload = report_synthesis._normalise_payload(json.loads(raw))
+    assert payload["clinical_assessment"]["validation_issues"]
+    assert payload["clinical_assessment"]["differential"][0]["supporting_evidence"][0]["source_refs"] == []
+
+
+def test_report_fallback_limits_red_flags_to_top_five_clinical_findings():
+    from capabilities.report_synthesis import _fallback_payload
+    from models import Severity
+
+    findings = [{"label": "Patient", "severity": "critical"}] + [
+        {"label": f"Finding {index}", "severity": "high"} for index in range(10)
+    ]
+    payload = _fallback_payload(findings, Severity.HIGH, RuntimeError("endpoint"))
+    assert len(payload["red_flags"]) == 5
+    assert not any(flag.startswith("Patient") for flag in payload["red_flags"])
+
+
 def test_local_openai_image_requests_send_pixels_and_respect_server_concurrency(tmp_path, monkeypatch):
     from capabilities import vision
     from concurrent.futures import ThreadPoolExecutor

@@ -117,7 +117,7 @@ def preflight() -> dict:
     from capabilities.hf_backend import backend_report
     from capabilities.model_zoo import coverage_table
     from capabilities.xrv_backend import available as xrv_available
-    from capabilities.vision import OLLAMA_MODEL, _ollama_reachable
+    from capabilities.vision import OLLAMA_MODEL, _ollama_reachable, _selected_ollama_model
     from capabilities.vision import VLM_BACKEND, local_server_info
     from config import describe
     from ingest.dicom_utils import PYDICOM_AVAILABLE
@@ -136,7 +136,7 @@ def preflight() -> dict:
             "docx": bool(importlib.util.find_spec("docx")),
             "xlsx": bool(importlib.util.find_spec("openpyxl")),
         },
-        "ollama": {"reachable": _ollama_reachable(), "model": OLLAMA_MODEL},
+        "ollama": {"reachable": _ollama_reachable(), "model": _selected_ollama_model(), "configured_model": OLLAMA_MODEL},
         "local_vision_server": local_server_info(),
         "cache_dir": str(RUNTIME.cache_dir),
     }

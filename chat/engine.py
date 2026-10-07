@@ -640,6 +640,12 @@ def render_analysis(report, record: AnalysisRun, seconds: float, *, include_asse
     ]
     if report.degraded:
         lines += ["", "> ⚠️ Degraded run — some stages failed; see `/report` warnings."]
+    if report.image_count:
+        lines += ["", f"**Direct image reads:** {len(report.image_reads)}/{report.image_count} completed."]
+        unread = [entry["id"] for entry in report.input_manifest
+                  if entry.get("kind") == "image" and entry.get("id") not in report.image_reads]
+        if unread:
+            lines.append(f"**Image reads unavailable:** {', '.join(unread)}. See `/report` → Run diagnostics for the failure reason.")
     if report.findings:
         lines += ["", "| Severity | Finding | Seen on | Confidence |", "|---|---|---|---|"]
         for f in report.findings[:12]:
@@ -654,7 +660,8 @@ def render_analysis(report, record: AnalysisRun, seconds: float, *, include_asse
         lines += ["", "**Next steps**"] + [f"{i}. {a}" for i, a in enumerate(status.recommended_actions, 1)]
     unscreened = [i for i, e in (report.screening or {}).items() if e.get("status") != "screened"]
     if unscreened:
-        lines += ["", f"_Not checked by any supervised model: {', '.join(unscreened)}._"]
+        lines += ["", f"_No matching supervised screening completed: {', '.join(unscreened)}. "
+                  "This is separate from the direct vision-model reads above._"]
     lines += ["", f"_Report: `{record.report_md}` · {seconds:.0f}s · {DISCLAIMER.split('.')[0]}._"]
     return "\n".join(lines)
 

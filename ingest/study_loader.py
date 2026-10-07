@@ -52,7 +52,23 @@ _FILENAME_HINTS = (
     (_TOKEN.format(r"(?:mammo|mammogram|mg)"), Modality.MAMMOGRAPHY),
     (_TOKEN.format(r"pet"), Modality.PET),
     (_TOKEN.format(r"(?:histo|path)"), Modality.PATHOLOGY),
+    # A named fracture/radiograph is a useful prior for exported teaching
+    # images. CLIP/medical-image gating can still override it when confident.
+    (_TOKEN.format(r"(?:fracture|fractures|bone[-_ ]?x[-_ ]?ray)"), Modality.XRAY),
     (_TOKEN.format(r"chest"), Modality.XRAY),
+)
+
+_BODY_PART_HINTS = (
+    (r"(?:chest|lung|thorax|bronch|rib)", "chest"),
+    (r"(?:head|brain|skull|cranial|cerebr|tumou?r)", "head"),
+    (r"(?:abdomen|abdo|pancre|appendix|appendic|liver|hepatic|gallbladder|cholecyst|hernia|kidney|renal)", "abdomen"),
+    (r"(?:pelvis|hip)", "pelvis"),
+    (r"(?:spine|vertebr|lumbar|cervical|thoracic[-_ ]?spine)", "spine"),
+    (r"(?:arm|hand|wrist|leg|tibia|fibula|knee|foot|ankle|elbow|shoulder|femur|fracture|ligament|limb|lower[-_ ]?leg)", "limb"),
+    (r"(?:breast|mamm)", "breast"),
+    (r"(?:neck|carotid|thyroid)", "neck"),
+    (r"(?:eye|ocular|cataract|retina|cornea)", "eye"),
+    (r"(?:heart|cardiac|myocard|electrocard|ecg)", "heart"),
 )
 
 
@@ -158,7 +174,7 @@ def _image_from_prepared(path, root, prepared, info, *, dicom=False):
     return StudyImage(
         image_id=image_id, source_path=str(path.resolve()), prepared_path=str(prepared), content_hash=info["content_hash"],
         prepared_hash=info.get("prepared_hash"),
-        modality=_infer_modality(path, metadata), body_part=metadata.get("BodyPartExamined"), view=metadata.get("ViewPosition"),
+        modality=_infer_modality(path, metadata), body_part=_infer_body_part(path, metadata), view=metadata.get("ViewPosition"),
         width=width, height=height, is_dicom=dicom, metadata=metadata, frame_index=index,
         quality=info.get("quality", {}), warnings=list(info.get("warnings", [])),
     )
@@ -247,7 +263,29 @@ def _infer_modality(path: Path, metadata: dict) -> Modality:
     for pattern, modality in _FILENAME_HINTS:
         if re.search(pattern, haystack):
             return modality
+    # Teaching-image filenames often concatenate the diagnosis and anatomy
+    # (``lowerlegfracture.png``), so token boundaries do not apply here.
+    if re.search(r"(?:fracture|tibia|fibula|skull|nasal[-_ ]?bone)", haystack):
+        return Modality.XRAY
     return Modality.UNKNOWN
+
+
+def _infer_body_part(path: Path, metadata: dict) -> str | None:
+    """Return a conservative region hint for prompt/routing context.
+
+    A filename hint never proves modality or disease. It only prevents clearly
+    named teaching images from reaching the model with no anatomical context;
+    header/CLIP evidence can still disagree.
+    """
+    for key in ("BodyPartExamined", "StudyDescription", "SeriesDescription"):
+        value = str(metadata.get(key, "") or "").strip()
+        if value:
+            return value
+    haystack = f"{path.parent.name}/{path.name}".lower().replace("\\", "/")
+    for pattern, body_part in _BODY_PART_HINTS:
+        if re.search(_TOKEN.format(pattern), haystack) or re.search(pattern, haystack):
+            return body_part
+    return None
 
 
 def _absorb_patient_sidecar(path: Path, study: Study) -> bool:

@@ -138,7 +138,7 @@ def run(request: CapabilityRequest) -> CapabilityResult:
             )
             selection = text_selection_trace()
         record_model("report_synthesis", model_id)
-        payload = _parse_json(raw)
+        payload = _normalise_payload(_parse_json(raw))
     except Exception as exc:  # noqa: BLE001 - emit a usable fallback report
         _log.warning("report synthesis failed: %s", exc)
         payload = _fallback_payload(findings, computed, exc)
@@ -261,7 +261,7 @@ def _parse_json(raw: str) -> dict:
 def _validate_payload(raw: str) -> None:
     from models import ClinicalAssessment
 
-    payload = _parse_json(raw)
+    payload = _normalise_payload(_parse_json(raw))
     if not isinstance(payload, dict) or not isinstance(payload.get("impression"), str) or not payload["impression"].strip():
         raise ValueError("report response has no usable impression")
     if not isinstance(payload.get("clinical_assessment"), dict):
@@ -271,12 +271,97 @@ def _validate_payload(raw: str) -> None:
         raise ValueError("clinical assessment has no integrated summary")
 
 
+def _normalise_payload(payload: dict) -> dict:
+    """Repair common model-shape drift before strict evidence validation.
+
+    Saved runs showed valid clinical prose rejected because models emitted
+    evidence as strings, omitted ``source_refs`` or left required nested fields
+    blank. This keeps the evaluator conservative: malformed evidence becomes
+    unlinked and is subsequently discarded, rather than being invented.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("report response must be an object")
+    normalised = dict(payload)
+    notes: list[str] = []
+    assessment = normalised.get("clinical_assessment")
+    if not isinstance(assessment, dict):
+        summary = str(normalised.get("impression") or normalised.get("summary") or "").strip()
+        if not summary:
+            raise ValueError("report response has no clinical assessment or impression")
+        assessment = {"integrated_summary": summary, "differential": []}
+        notes.append("Missing clinical_assessment was synthesized from the model impression; no hypotheses accepted.")
+    else:
+        assessment = dict(assessment)
+
+    differential = assessment.get("differential") or []
+    if not isinstance(differential, list):
+        differential = []
+        notes.append("Malformed differential discarded.")
+    fixed = []
+    for item in differential:
+        if not isinstance(item, dict):
+            notes.append("Malformed hypothesis discarded.")
+            continue
+        hypothesis = dict(item)
+        for field in ("supporting_evidence", "opposing_evidence"):
+            evidence_items = hypothesis.get(field) or []
+            if not isinstance(evidence_items, list):
+                evidence_items = []
+                notes.append(f"Malformed {field} discarded for {hypothesis.get('condition', 'unknown')}.")
+            converted = []
+            for evidence in evidence_items:
+                if isinstance(evidence, str):
+                    converted.append({"detail": evidence, "source_refs": []})
+                    notes.append(f"String {field} converted to unlinked evidence for {hypothesis.get('condition', 'unknown')}.")
+                elif isinstance(evidence, dict):
+                    row = dict(evidence)
+                    row["detail"] = str(row.get("detail") or row.get("text") or "").strip()
+                    refs = row.get("source_refs") or row.get("sources") or []
+                    row["source_refs"] = [str(ref) for ref in refs] if isinstance(refs, list) else [str(refs)]
+                    if row["detail"]:
+                        converted.append(row)
+                else:
+                    notes.append(f"Malformed evidence discarded for {hypothesis.get('condition', 'unknown')}.")
+            hypothesis[field] = converted
+        tests = hypothesis.get("suggested_tests") or []
+        if not isinstance(tests, list):
+            tests = []
+        hypothesis["suggested_tests"] = [
+            {"test": str(test.get("test") or "").strip(),
+             "purpose": str(test.get("purpose") or "").strip(),
+             "interpretation": str(test.get("interpretation") or "").strip()}
+            for test in tests if isinstance(test, dict) and str(test.get("test") or "").strip()
+        ]
+        fixed.append(hypothesis)
+    assessment["differential"] = fixed
+    assessment.setdefault("integrated_summary", str(normalised.get("impression") or normalised.get("summary") or "").strip())
+    assessment.setdefault("unresolved_questions", [])
+    assessment.setdefault("limitations", [])
+    assessment["validation_issues"] = list(dict.fromkeys(
+        [str(item) for item in assessment.get("validation_issues", [])] + notes
+    ))
+    normalised["clinical_assessment"] = assessment
+    if notes:
+        normalised["_normalization_notes"] = notes
+    return normalised
+
+
 def _fallback_payload(findings: list, severity: Severity, exc: Exception) -> dict:
     """A report still has to be delivered when the synthesis model is down."""
     labels = [
         str(f.get("label")) for f in findings if isinstance(f, dict) and f.get("label")
     ]
+    labels = list(dict.fromkeys(labels))
+    administrative = {"patient", "date", "impression", "indication", "patient information", "patient demographics"}
+    labels = [label for label in labels if label.casefold() not in administrative]
     listed = "; ".join(labels) if labels else "no findings were extracted"
+    urgent = []
+    for finding in findings:
+        if not isinstance(finding, dict) or str(finding.get("label", "")).casefold() in administrative:
+            continue
+        if finding.get("severity") in {"critical", "high"} and finding.get("label") not in urgent:
+            urgent.append(str(finding["label"]))
+    urgent = urgent[:5]
     return {
         "indication": "Not available (report synthesis unavailable).",
         "technique": "See study metadata.",
@@ -287,10 +372,6 @@ def _fallback_payload(findings: list, severity: Severity, exc: Exception) -> dic
         ),
         "summary": f"Synthesis unavailable; {len(labels)} finding(s) carried forward.",
         "triage": _triage_for(severity),
-        "red_flags": [
-            f"{label} (auto-escalated: impression could not be generated)"
-            for label, f in zip(labels, findings)
-            if isinstance(f, dict) and f.get("severity") in {"critical", "high"}
-        ],
+        "red_flags": [f"{label} (priority finding retained; impression unavailable)" for label in urgent],
         "recommended_actions": ["Manual radiologist review required."],
     }

@@ -144,6 +144,12 @@ Ollama availability expires after 5s negative/30s positive. `--doctor` inspects
 containing “medgemma” accepts images: the checked `alibayram/medgemma:4b` listing
 advertises text-only support. Arbitrary custom tags need their own verification.
 
+Without an explicit `MAOS_OLLAMA_MODEL`, auto-routing first checks the existing
+`medgemma1.5:latest` installation, then the documented `gemma3:4b` baseline.
+Only an installed model advertising `vision` is eligible; explicit model choices
+are preserved. The selected alias is used consistently in requests, cache keys
+and preflight diagnostics.
+
 **Local transformers** remains an option on larger GPUs (`MAOS_VLM_BACKEND=local`,
 automatic local VLM routing requires ≥12GB VRAM).
 

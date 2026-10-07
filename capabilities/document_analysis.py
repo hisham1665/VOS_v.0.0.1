@@ -38,6 +38,12 @@ _DOCUMENT_TYPES = {
     "unknown",
 }
 _SEVERITIES = {"critical", "high", "moderate", "low", "normal", "indeterminate"}
+_ADMINISTRATIVE_LABELS = {
+    "patient", "patient information", "patient info", "patient demographics",
+    "demographics", "date", "report date", "study date", "indication",
+    "clinical indication", "referring indication", "impression", "report",
+    "patient name", "patient id", "medical record number", "mrn",
+}
 
 _SYSTEM_PROMPT = """\
 You analyze one page of a medical document for a clinician. The supplied page
@@ -307,6 +313,22 @@ def _analyze_page(
     try:
         parsed = _validate_response(_parse_json(raw), source_ref)
     except (TypeError, ValueError) as exc:
+        if image_path is not None and request.artifacts.get("verify_page_image"):
+            # A verification reread is allowed to return narrative text. Do
+            # not call that a failed page extraction or turn it into clinical
+            # findings; retain the raw visual observation as limited evidence
+            # for a reviewer and explicitly mark the structured result absent.
+            return {
+                "raw": raw,
+                "model": model_id,
+                "document_type": "unknown",
+                "findings": [],
+                "quality_issues": [
+                    "Visual verification returned unstructured text; no structured findings accepted.",
+                    f"Visual verification parser detail: {type(exc).__name__}: {exc}",
+                ],
+                "_model_selection": {"route": backend, "model": model_id, "structured": False},
+            }
         # Some text models ignore the JSON-only instruction and return a
         # readable `FINDINGS:` block. Recover exact lab lines without making a
         # diagnostic claim; malformed non-lab responses still fail loudly.
@@ -478,6 +500,12 @@ def _validate_response(payload: Any, source_ref: str) -> dict[str, Any]:
             description = str(item.get("description", "")).strip()
             if not label or not description:
                 raise ValueError(f"finding {index} has no usable label and description")
+            if _is_administrative_label(label):
+                # Patient/date/indication/impression metadata belongs in source
+                # provenance, not in the clinical finding list. Keeping it here
+                # inflated reports and could make a normal administrative line
+                # look like clinical evidence.
+                continue
             severity = str(item.get("severity", "indeterminate")).strip().lower()
             if severity not in _SEVERITIES:
                 severity = "indeterminate"
@@ -664,6 +692,16 @@ def _canonical_document_type(value: str) -> str:
         "nonmedical": "non_medical",
     }
     return aliases.get(normal, normal)
+
+
+def _is_administrative_label(label: str) -> bool:
+    normal = re.sub(r"\s+", " ", label.casefold().replace("_", " ").strip())
+    if normal in _ADMINISTRATIVE_LABELS:
+        return True
+    return any(token in normal for token in (
+        "patient demographic", "patient information", "report date",
+        "clinical indication", "referring indication", "medical record",
+    ))
 
 
 def _mapping_has(value: Any, key: str) -> bool:

@@ -38,7 +38,16 @@ def is_transient(exc: BaseException) -> bool:
     """Heuristically decide whether ``exc`` is worth a retry."""
     if isinstance(exc, (TimeoutError, ConnectionError)):
         return True
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int):
+        # Structured status wins over prose: request IDs may contain "500"
+        # even in a permanent model_not_supported HTTP 400 response.
+        return status in {408, 429, 500, 502, 503, 504}
     text = f"{type(exc).__name__}: {exc}".lower()
+    if any(marker in text for marker in ("model_not_supported", "not supported by any provider", "invalid_request_error")):
+        return False
     return any(marker in text for marker in _TRANSIENT_MARKERS)
 
 

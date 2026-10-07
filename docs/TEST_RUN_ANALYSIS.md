@@ -1,5 +1,10 @@
 # Analysis of the saved disease runs
 
+> This is the earlier `tests/testingdeseases/` audit. The later 20-case audit
+> covering `tests/test2full/` and `tests/tetingmed1/` is in
+> [`SAVED_CASE_AUDIT.md`](SAVED_CASE_AUDIT.md), including fixture-identity
+> problems found in the supplied plan/result pairs.
+
 Reviewed on 2026-10-05. The supplied index is
 `tests/testingdeseases/testingdetails.txt`; the paired plans and reports are in
 `tests/testingdeseases/testingmed/`. There are nine indexed cases, plus an
