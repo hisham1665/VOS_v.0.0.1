@@ -1,10 +1,10 @@
 from typing import Optional
 
 from aos_v0.config import GROQ_API_KEY, make_groq
+from aos_v0.config import _MODEL
 
 _client = make_groq(GROQ_API_KEY)
 
-_MODEL = "qwen/qwen3.6-27b"
 
 _DEFAULT_SYSTEM = (
     "You are a factual summarizer. Given a body of text, extract and "

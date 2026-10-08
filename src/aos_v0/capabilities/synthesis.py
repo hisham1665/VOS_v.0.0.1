@@ -14,10 +14,9 @@ every enumerated item and concrete data point the upstream nodes gathered.
 from typing import Optional
 
 from aos_v0.config import GROQ_API_KEY, make_groq
+from aos_v0.config import _MODEL
 
 _client = make_groq(GROQ_API_KEY)
-
-_MODEL = "qwen/qwen3.6-27b"
 
 _SYSTEM = """\
 You write the FINAL ANSWER for a user's request, using research gathered by

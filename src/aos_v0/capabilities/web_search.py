@@ -2,9 +2,9 @@ from typing import Optional
 
 from ddgs import DDGS
 from aos_v0.config import GROQ_API_KEY, make_groq
+from aos_v0.config import _MODEL
 
 _client = make_groq(GROQ_API_KEY)
-_MODEL = "qwen/qwen3.6-27b"
 
 # Sentinel the Failure Manager's content detector looks for. Emitting a token
 # instead of prose means an empty result is a *classifiable* failure rather

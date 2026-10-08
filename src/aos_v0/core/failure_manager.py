@@ -337,7 +337,17 @@ class FailureManager:
                     continue
                 attempt_rid = remaining.pop(0)
                 attempt_fn = self.registry.run_fn(attempt_rid)
+                
                 instruction = node.description
+                if best_output and best_output.strip():
+                    trunc = best_output.strip()[:2000]
+                    instruction = (
+                        f"{instruction}\n\n"
+                        f"A previous attempt on resource '{primary_resource_id}' produced this partial result before failing "
+                        f"({failure_class}). Use it; do not redo work it already completed:\n"
+                        f"{trunc}"
+                    )
+                
                 log(f"[failure-manager] node '{node.id}': substituting -> '{attempt_rid}'")
 
             else:  # pragma: no cover -- table and constants are in sync
