@@ -12,6 +12,7 @@ PDF rasterization requires ``pypdfium2``; missing it raises an actionable
 from __future__ import annotations
 
 import re
+import os
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -246,7 +247,7 @@ def _extract_folder(path: Path, max_pages: int) -> Tuple[List[Frame], List[str],
         if len(frames) >= max_pages:
             truncated = True
             break
-        rel = str(file.relative_to(path))
+        rel = str(file.relative_to(path)).replace(os.sep, "/")
         try:
             frames.extend(_extract_image_file(file, rel, member=rel))
         except (IntakeError, UnsupportedFormatError) as exc:

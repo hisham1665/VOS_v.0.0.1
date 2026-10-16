@@ -1,0 +1,63 @@
+schema_version: 1
+domain: paper-evaluation
+
+# Operational policy belongs here. Keep API keys and tokens in .env.
+runtime:
+  max_workers: 4
+  call_timeout_s: 90
+  max_elapsed_s: 600
+  max_retries: 2
+  max_nodes: 128
+  budget_usd: 0.50
+  completeness_check: false
+  output_dir: data/outputs
+  log_dir: log
+
+# Shared memory is bounded and request-scoped by default. It is useful for the
+# general AOS graph; the paper evaluator keeps its own evidence records.
+memory:
+  enabled: true
+  reuse: true
+  max_entries: 64
+  max_value_bytes: 32000
+  max_total_bytes: 512000
+  min_relevance: 0.15
+  log_decisions: false
+  log_content: false
+
+models:
+  text:
+    provider: groq
+    model: openai/gpt-oss-20b
+    api_key_env: GROQ_API_KEY
+  planner:
+    provider: groq
+    model: openai/gpt-oss-120b
+    api_key_env: GROQ_API_KEY
+    max_tokens: 4096
+  dna:
+    provider: groq
+    model: openai/gpt-oss-20b
+    api_key_env: GROQ_API_KEY
+  dna_strong:
+    provider: groq
+    model: openai/gpt-oss-120b
+    api_key_env: GROQ_API_KEY
+  synthesis:
+    provider: groq
+    model: openai/gpt-oss-120b
+    api_key_env: GROQ_API_KEY
+    max_tokens: 4096
+  vision:
+    provider: ollama
+    model: medgemma1.5:latest
+    api_key_env: ""
+    base_url: http://localhost:11434/v1
+  audio:
+    provider: groq
+    model: whisper-large-v3-turbo
+    api_key_env: GROQ_API_KEY
+
+# Add a provider-neutral capability here when a project needs one. A Python
+# handler points to module:function and is loaded lazily.
+capabilities: {}

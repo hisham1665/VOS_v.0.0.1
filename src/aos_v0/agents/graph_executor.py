@@ -1,275 +1,163 @@
+"""AOS 1.0 graph execution: bounded scheduling, provenance, and selective memory."""
+
+import hashlib
+import json
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
+from pathlib import Path
 
-from aos_v0.core.capability_registry import CapabilityRegistry
-from aos_v0.core.failure_manager import FailureManager
-from aos_v0.core.graph_utils import build_waves
-from aos_v0.core.models import Artifact, ArtifactModalityMismatch, Graph
-from aos_v0.core.events import EventType, OrchestrationEvent
 from aos_v0.agents.sub_agent import SubAgent
-
-_print_lock = threading.Lock()
-
-_AUDIO_FLAGS = frozenset({
-    "speech.transcription", "speech_recognition",
-    "automatic_speech_recognition", "transcription",
-    "audio_input", "audio_understanding",
-    "audio_analysis", "audio_to_text",
-    "multilingual_speech", "speech_understanding",
-})
-
-_IMAGE_FLAGS = frozenset({
-    "vision.understanding", "vision_input",
-    "image_classification", "object_detection",
-    "object_identification", "object_localization",
-    "multi_object_detection", "image_understanding",
-    "visual_question_answering", "visual_reasoning",
-    "vision_language",
-})
-
-_DOCUMENT_FLAGS = frozenset({
-    "document.extraction",
-})
+from aos_v0.core.capability_registry import required_input_modality
+from aos_v0.core.events import EventType, OrchestrationEvent
+from aos_v0.core.failure_manager import FailureManager
+from aos_v0.core.graph_utils import ancestors, descendants
+from aos_v0.core.models import Artifact, ArtifactModalityMismatch
+from aos_v0.core.scheduler import run_dag
+from aos_v0.settings import load_settings
 
 
-def _safe_print(msg: str) -> None:
-    with _print_lock:
-        print(msg)
-
-
-def _infer_modality(node_flags: set, capability: str) -> Optional[str]:
-    """Infer the file modality a node needs from its DNA flags and capability."""
-    if node_flags & _AUDIO_FLAGS or capability in ("speech_transcription", "audio"):
-        return "audio"
-    if node_flags & _IMAGE_FLAGS or capability == "vision":
-        return "image"
-    if node_flags & _DOCUMENT_FLAGS or capability in ("document_extraction", "document"):
-        return "document"
-    return None
+def _infer_modality(node_flags, capability):
+    return required_input_modality(list(node_flags), capability)
 
 
 class GraphExecutor:
-    """Runs the DAG wave by wave, handing each node to a SubAgent.
+    def __init__(self, registry, failure_manager=None, event_sink=None, request_id="",
+                 memory_bank=None, controller=None, retriever=None, decision_log=None,
+                 memory_budget=None, reuse_enabled=True, settings=None):
+        from aos_v0.core.memory_admission import HeuristicController, DecisionLog
+        from aos_v0.core.memory_retrieval import ContextBudget, MemoryRetriever
 
-    The registry is held here rather than built per node so every sub-agent
-    shares one manifest table -- the Learning Manager's prior updates would
-    otherwise be lost between nodes. The FailureManager is shared for the same
-    reason: one fault report per workflow, not one per node.
-    """
-
-    def __init__(
-        self,
-        registry: CapabilityRegistry,
-        failure_manager: Optional[FailureManager] = None,
-        event_sink=None,
-        request_id: str = "",
-    ):
+        self.settings = settings or load_settings()
         self.registry = registry
-        self.failure_manager = failure_manager or FailureManager(registry)
+        self.failure_manager = failure_manager or FailureManager(registry, self.settings.runtime.max_retries)
         self.event_sink = event_sink
         self.request_id = request_id
+        self.memory_bank = memory_bank
+        self.reuse_enabled = reuse_enabled
+        self.admission_controller = controller or HeuristicController()
+        self.memory_retriever = retriever or MemoryRetriever()
+        self.decision_log = decision_log or DecisionLog(request_id)
+        self.memory_budget = memory_budget or ContextBudget()
+        self._lock = threading.RLock()
 
-    def _emit(self, event_type: EventType, **payload) -> None:
+    def _emit(self, kind, **payload):
         if self.event_sink:
-            self.event_sink(OrchestrationEvent(event_type, self.request_id, payload))
+            self.event_sink(OrchestrationEvent(kind, self.request_id, payload))
 
-    def run(self, graph: Graph, inputs: Optional[dict[str, str]] = None) -> Graph:
-        waves = build_waves(graph)
-        by_id = {n.id: n for n in graph.nodes}
+    def run(self, graph, inputs=None):
         inputs = inputs or {}
-
-        # --- artifact lineage tracking ---
-        # Register user-supplied input artifacts so parallel branches from the
-        # same original both receive the correct file.
-        artifacts: dict[str, Artifact] = dict(graph.artifacts)
+        if len(graph.nodes) > self.settings.runtime.max_nodes:
+            raise ValueError(f"graph exceeds runtime.max_nodes={self.settings.runtime.max_nodes}")
+        by_id = {node.id: node for node in graph.nodes}
         for modality, path in inputs.items():
-            if modality in ("audio", "image", "document") and path:
+            if modality in {"image", "audio", "document"}:
                 aid = f"input_{modality}"
-                if aid not in artifacts:
-                    artifacts[aid] = Artifact(
-                        id=aid, modality=modality, path=path, source="user_input",
-                    )
-        graph.artifacts = artifacts
+                graph.artifacts.setdefault(aid, Artifact(id=aid, modality=modality, path=path))
+        graph.original_plan = graph.model_dump(exclude={"original_plan"})
 
-        for wave_idx, wave in enumerate(waves):
-            _safe_print(
-                f"[graph-executor] wave {wave_idx} starting "
-                f"({len(wave)} nodes, running concurrently)"
-            )
-
-            def _run_node(node):
-                started = time.monotonic()
-                self._emit(EventType.AGENT_STARTED, node_id=node.id, agent=node.capability)
-                # --- determine node input ---
-                if node.data_inputs:
-                    # Explicit data_inputs: route specified artifacts, regardless
-                    # of whether this is a root node or a dependent node.
-                    parts = []
-                    for aid in node.data_inputs:
-                        art = artifacts.get(aid)
-                        if art is None:
-                            parts.append(f"[artifact '{aid}' not found]")
-                            continue
-                        self._validate_modality(node, art)
-                        content = self._read_artifact(art)
-                        parts.append(
-                            f"From artifact '{aid}' ({art.modality}):\n{content}"
-                        )
-                    node.input = "\n\n".join(parts)
-                elif node.depends_on:
-                    # Dependent node without data_inputs: use parent outputs.
-                    parts = []
-                    for parent_id in node.depends_on:
-                        parent = by_id[parent_id]
-                        parts.append(
-                            f"From node '{parent.id}' ({parent.description}):\n"
-                            f"{parent.output or '(no output produced)'}"
-                        )
-                    node.input = "\n\n".join(parts)
+        def execute(node):
+            started = time.monotonic()
+            self._emit(EventType.AGENT_STARTED, node_id=node.id, agent=node.capability)
+            lineage = ancestors(graph, node.id)
+            modality = _infer_modality(node.dna.flags if node.dna else [], node.capability)
+            with self._lock:
+                artifacts = dict(graph.artifacts)
+            if node.data_inputs:
+                selected = [artifacts[aid] for aid in node.data_inputs]
+                for artifact in selected:
+                    self._validate_modality(node, artifact)
+                if modality:
+                    if len(selected) != 1 or not selected[0].path:
+                        raise ValueError("media reader requires one original file artifact")
+                    node.input = selected[0].path
                 else:
-                    # Root node without data_inputs: route typed input artifacts
-                    # based on DNA flags.
-                    node_flags = set(node.dna.flags) if node.dna else set()
-                    modality = _infer_modality(node_flags, node.capability)
-                    if modality and modality in inputs:
-                        node.input = inputs[modality]
-                    else:
-                        node.input = graph.job
-
-                # Inject vision context for non-vision downstream nodes.
-                vision_arts = [
-                    a for a in artifacts.values()
-                    if a.modality == "image" and a.source != "user_input"
-                ]
-                if node.capability != "vision" and vision_arts:
-                    vision_ctx = "\n\n".join(
-                        f"[IMAGE IDENTIFICATION]: {self._read_artifact(a)}"
-                        for a in vision_arts
-                    )
-                    node.input = (
-                        f"IMPORTANT CONTEXT — an image was analyzed and the following "
-                        f"was identified:\n{vision_ctx}\n\n---\n\n{node.input}"
-                    )
-
-                # Inject audio context for non-audio downstream nodes.
-                audio_arts = [
-                    a for a in artifacts.values()
-                    if a.modality == "audio" and a.source != "user_input"
-                ]
-                if node.capability not in ("speech_transcription", "audio") and audio_arts:
-                    audio_ctx = "\n\n".join(
-                        f"[AUDIO TRANSCRIPTION]: {self._read_artifact(a)}"
-                        for a in audio_arts
-                    )
-                    node.input = (
-                        f"IMPORTANT CONTEXT — an audio file was transcribed and the following "
-                        f"was identified:\n{audio_ctx}\n\n---\n\n{node.input}"
-                    )
-
-                # Inject document context for non-document downstream nodes.
-                # A document-extraction node's output artifact is pathless, so
-                # resolve its text from the completed node's output rather than
-                # passing a placeholder.
-                doc_arts = [
-                    a for a in artifacts.values()
-                    if a.modality == "document" and a.source != "user_input"
-                ]
-                if node.capability not in ("document_extraction", "document") and doc_arts:
-                    doc_parts = []
-                    for a in doc_arts:
-                        resolved = self._resolve_node_output(a, by_id)
-                        doc_parts.append(
-                            resolved or self._read_artifact(a)
-                        )
-                    doc_ctx = "\n\n".join(
-                        f"[DOCUMENT CONTENT]: {part}" for part in doc_parts
-                    )
-                    node.input = (
-                        f"IMPORTANT CONTEXT — a document was extracted and the following "
-                        f"content was identified:\n{doc_ctx}\n\n---\n\n{node.input}"
-                    )
-
-                agent = SubAgent(
-                    name=f"sub-agent-{node.id}",
-                    capability=node.capability,
-                    registry=self.registry,
-                    failure_manager=self.failure_manager,
-                    event_sink=self.event_sink,
-                    request_id=self.request_id,
+                    node.input = "\n\n".join(self._read_artifact(a) for a in selected)
+            elif modality:
+                node.input = inputs.get(modality)
+                if not node.input:
+                    raise ValueError(f"missing {modality} input for {node.id}")
+            elif node.depends_on:
+                node.input = "\n\n".join(
+                    f"From node '{parent}':\n{by_id[parent].output or '[UNAVAILABLE]'}"
+                    for parent in node.depends_on
                 )
-                agent.perform(node)
+                node.parent_data = {parent: by_id[parent].result.data for parent in node.depends_on
+                                    if by_id[parent].result is not None}
+            else:
+                node.input = node.input or graph.job
 
-                # Register node output as a new artifact for downstream nodes.
-                if node.output and node.status != "degraded":
-                    node_flags = set(node.dna.flags) if node.dna else set()
-                    modality = _infer_modality(node_flags, node.capability)
-                    out_modality = modality or "text"
-                    out_aid = f"output_{node.id}"
-                    artifacts[out_aid] = Artifact(
-                        id=out_aid,
-                        modality=out_modality,
-                        source=f"node:{node.id}",
+            # Reuse identity is exact and includes instructions, model profile,
+            # and file contents. Changing a file in place invalidates the hit.
+            from aos_v0.core.shared_memory import MemoryCandidate, compute_input_hash
+            identity = {"input": node.input, "instruction": node.description,
+                        "profiles": self.settings.model_dump()["models"]}
+            if modality and node.input and Path(node.input).is_file():
+                with Path(node.input).open("rb") as handle:
+                    identity["file_hash"] = hashlib.file_digest(handle, "sha256").hexdigest()
+            input_hash = compute_input_hash(node.capability, json.dumps(identity, sort_keys=True))
+            reusable = {"document_extraction", "speech_transcription", "vision"}
+            hit = self.memory_bank.lookup_reusable(node.capability, input_hash) if self.memory_bank and self.reuse_enabled else None
+            if hit and node.capability in reusable:
+                node.output, node.status = hit.value, "done"
+                node.performed_by, node.routing_mode = "memory-reuse", "memory"
+                node.bound_resource = hit.resource_id
+                self.memory_bank.get(hit.id, recalled_by=node.id)
+            else:
+                if not modality and self.memory_bank:
+                    recall = self.memory_retriever.select(node, self.memory_bank, lineage, self.memory_budget)
+                    node.input = recall.injected_text + node.input
+                elif not modality:
+                    # Preserve legacy media evidence, restricted to ancestors.
+                    context = [a for a in artifacts.values() if a.source.startswith("node:")
+                               and a.source[5:] in lineage and a.modality in {"document", "image", "audio"}]
+                    if context:
+                        node.input = "IMPORTANT CONTEXT:\n" + "\n".join(self._read_artifact(a) for a in context) + "\n\n" + node.input
+                SubAgent(f"sub-agent-{node.id}", node.capability, self.registry, self.failure_manager,
+                         self.event_sink, self.request_id).perform(node)
+                if self.memory_bank and node.output:
+                    from aos_v0.core.memory_summary import build_summary_key
+                    candidate = MemoryCandidate(
+                        node_id=node.id, capability=node.capability, description=node.description,
+                        resource_id=node.bound_resource, status=node.status, value=node.output,
+                        agent_input=node.input, input_hash=input_hash, fanout=len(descendants(graph, node.id)),
+                        key=build_summary_key(node.id, node.capability, node.description),
                     )
+                    decision = self.admission_controller.decide(candidate, self.memory_bank, node)
+                    entry = self.memory_bank.admit(candidate, decision) if decision.admit else None
+                    self.decision_log.record(candidate, decision, entry_id=entry.id if entry else None)
+            if node.output and node.status == "done":
+                aid = f"output_{node.id}"
+                with self._lock:
+                    graph.artifacts[aid] = Artifact(id=aid, modality=modality or "text", content=node.output,
+                                                   source=f"node:{node.id}", data=node.result.data if node.result else {})
+            self._emit(EventType.AGENT_COMPLETED if node.status == "done" else EventType.AGENT_FAILED,
+                       node_id=node.id, agent=node.capability, status=node.status, resource=node.bound_resource,
+                       elapsed_ms=round((time.monotonic() - started) * 1000, 2))
 
-                _safe_print(
-                    f"[graph-executor] node '{node.id}' {node.status} "
-                    f"({len(node.output or '')} chars)"
-                )
-                elapsed_ms = round((time.monotonic() - started) * 1000, 2)
-                event_type = EventType.AGENT_COMPLETED if node.status == "done" else EventType.AGENT_FAILED
-                self._emit(event_type, node_id=node.id, agent=node.capability,
-                           resource=node.bound_resource, status=node.status, elapsed_ms=elapsed_ms)
-                return node
+        def failed(node, exc):
+            node.status, node.error = "failed", f"{type(exc).__name__}: {exc}"
+            node.output = f"[UNAVAILABLE — {node.id}: {node.error}]"
+            self._emit(EventType.AGENT_FAILED, node_id=node.id, error=node.error)
 
-            with ThreadPoolExecutor(max_workers=len(wave)) as pool:
-                futures = {pool.submit(_run_node, node): node for node in wave}
-                for future in as_completed(futures):
-                    future.result()
-
-            _safe_print(f"[graph-executor] wave {wave_idx} complete")
-
-        return graph
-
-    # -- modality validation -------------------------------------------------
+        return run_dag(graph, execute, max_workers=self.settings.runtime.max_workers,
+                       max_elapsed_s=self.settings.runtime.max_elapsed_s, on_error=failed)
 
     @staticmethod
-    def _validate_modality(node, artifact: Artifact) -> None:
-        """Raise ArtifactModalityMismatch if the artifact doesn't match the node's input requirement."""
-        node_flags = set(node.dna.flags) if node.dna else set()
-        expected = _infer_modality(node_flags, node.capability)
-        if expected and artifact.modality != expected:
-            raise ArtifactModalityMismatch(
-                node.id, artifact.id, expected, artifact.modality,
-            )
+    def _validate_modality(node, artifact):
+        expected = _infer_modality(node.dna.flags if node.dna else [], node.capability)
+        if expected and expected != artifact.modality:
+            raise ArtifactModalityMismatch(node.id, artifact.id, expected, artifact.modality)
 
     @staticmethod
-    def _read_artifact(artifact: Artifact) -> str:
-        """Read artifact content.
-
-        Image/audio artifacts carry a path so vision/ASR providers can load the
-        file themselves. Document artifacts are different: no provider consumes
-        a raw PDF path, so return the *extracted text* so LLM nodes receive
-        real content instead of a useless file path.
-        """
+    def _read_artifact(artifact):
+        if artifact.content is not None:
+            return artifact.content
         if artifact.path and artifact.modality == "document":
-            from aos_v0.capabilities.document import run as extract_document
-            try:
-                content = extract_document(artifact.path)
-            except Exception as exc:  # noqa: BLE001 -- degrade to a visible gap
-                return f"[document extraction failed for {artifact.path}: {exc}]"
-            return content
-        if artifact.path:
-            return artifact.path
-        return f"[artifact {artifact.id} ({artifact.modality})]"
+            from aos_v0.capabilities.document import run
+            return run(artifact.path)
+        return artifact.path or f"[UNAVAILABLE artifact {artifact.id}]"
 
     @staticmethod
-    def _resolve_node_output(artifact: Artifact, nodes_by_id: dict) -> Optional[str]:
-        """For a node-produced artifact, return the node's completed text output."""
-        if artifact.source.startswith("node:"):
-            node_id = artifact.source.split(":", 1)[1]
-            node = nodes_by_id.get(node_id)
-            if node is not None and node.output:
-                return node.output
-        return None
+    def _resolve_node_output(artifact, nodes_by_id):
+        node = nodes_by_id.get(artifact.source.removeprefix("node:"))
+        return node.output if node else None

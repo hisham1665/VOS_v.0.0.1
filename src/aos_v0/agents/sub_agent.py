@@ -56,7 +56,13 @@ class SubAgent:
         )
 
         self._routing_started = time.monotonic()
-        fn, resource_id, substitutes = self._route(node)
+        try:
+            fn, resource_id, substitutes = self._route(node)
+        except (InfeasibleDNAError, KeyError) as exc:
+            node.status = "degraded"
+            node.error = str(exc)
+            node.output = f"[UNAVAILABLE — {node.id}: {exc}]"
+            return node
 
         node.output = self.failure_manager.execute(
             node=node,
@@ -90,9 +96,10 @@ class SubAgent:
 
         try:
             decision = self.registry.select(node.dna, required_modality=modality)
-        except InfeasibleDNAError as exc:
-            print(f"[{self.name}] DNA infeasible, trying relaxed routing: {exc}")
-            return self._route_relaxed(node, modality=modality)
+        except InfeasibleDNAError:
+            # Hard constraints also apply during fallback. No partial skill
+            # match may silently bypass the operator's cost/quality policy.
+            raise
 
         node.bound_resource = decision.resource_id
         node.routing_mode = "dna"
@@ -136,15 +143,6 @@ class SubAgent:
         # offer partial-flag-overlap resources as fallback substitutes so the
         # FailureManager has something to try on resource.outage. Same modality
         # guard applies.
-        if not substitutes:
-            node_flags = set(node.dna.flags)
-            substitutes = [
-                m.resource_id
-                for m in self.registry.routable_for_modality(modality)
-                if m.resource_id != decision.resource_id
-                and node_flags & set(m.capabilities)
-            ]
-
         return self.registry.run_fn(decision.resource_id), decision.resource_id, substitutes
 
 
@@ -203,6 +201,13 @@ class SubAgent:
         self, node: Node, reason: str, modality: Optional[str] = None
     ) -> Tuple[object, str, List[str]]:
         fn = self.registry.find_by_capability(node.capability)
+        from aos_v0.core.models import CapabilityDNA
+
+        manifest = self.registry.describe(node.capability)
+        requirement = node.dna or CapabilityDNA(flags=manifest.capabilities)
+        reason = self.registry.rejection_reason(manifest, requirement, modality)
+        if reason:
+            raise InfeasibleDNAError(requirement, {node.capability: reason})
         node.bound_resource = node.capability
         node.routing_mode = "exact"
         print(f"[{self.name}] exact-match routing on '{node.capability}' ({reason})")

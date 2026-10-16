@@ -318,7 +318,34 @@ class FailureManager:
             )
             return self._gap_marker(node, "relaxed_routing", None)
 
-        output, error = self._invoke(primary_fn, node.input, node.description)
+        def invoke(fn, resource_id, instruction):
+            from aos_v0.providers.gateway import begin_usage, end_usage
+            from aos_v0.core.models import CapabilityResult
+            import json
+
+            call_started = time.monotonic()
+            token = begin_usage()
+            output, error = self._invoke(fn, node.input, instruction)
+            usage = end_usage(token)
+            if isinstance(output, CapabilityResult):
+                node.result = output
+                if output.status == "degraded":
+                    error = ValueError("; ".join(output.issues) or "capability returned degraded result")
+                output = output.text
+            elif isinstance(output, dict):
+                output = json.dumps(output)
+            elif output is not None and not isinstance(output, str):
+                output = getattr(output, "text", str(output))
+            elapsed = (time.monotonic() - call_started) * 1000
+            healthy = not self.detect(node, output, error)
+            self.registry.performance.observe(resource_id, healthy, elapsed)
+            node.attempts.append({"resource": resource_id, "elapsed_ms": round(elapsed, 2),
+                                  "success": healthy, "error": str(error) if error else None})
+            for key in ("calls", "input_tokens", "output_tokens"):
+                node.usage[key] = node.usage.get(key, 0) + usage.get(key, 0)
+            return output, error
+
+        output, error = invoke(primary_fn, primary_resource_id, node.description)
         detections = self.detect(node, output, error)
         outcome.detections = detections
 
@@ -371,7 +398,7 @@ class FailureManager:
             else:  # pragma: no cover -- table and constants are in sync
                 continue
 
-            retry_output, retry_error = self._invoke(attempt_fn, node.input, instruction)
+            retry_output, retry_error = invoke(attempt_fn, attempt_rid, instruction)
             retry_detections = self.detect(node, retry_output, retry_error)
 
             if not retry_detections:

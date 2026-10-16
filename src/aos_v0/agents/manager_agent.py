@@ -2,9 +2,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from groq import Groq
-
-from aos_v0.config import GROQ_API_KEY, make_groq
+from aos_v0.providers.gateway import ModelGateway
 from aos_v0.core.graph_utils import (
     validate_graph,
     build_waves,
@@ -19,8 +17,6 @@ from aos_v0.core.models import CapabilityDNA, DNAOrdinals, Graph, Node
 _CAPABILITIES = ["web_search", "summarization", "vision", "speech_transcription", "audio", "document_extraction"]
 
 _SYNTHESIS_NODE_ID = "final"
-
-_MODEL = "openai/gpt-oss-120b"
 
 _SYSTEM_PROMPT = f"""\
 You are a task planner. Given a user job, decompose it into a directed acyclic \
@@ -199,7 +195,7 @@ class ManagerAgent:
     _MAX_COMPLETENESS_RETRIES = 1
 
     def __init__(self):
-        self._client = make_groq(GROQ_API_KEY)
+        self._gateway = ModelGateway()
 
     def create_plan(self, user_prompt: str, inputs: Optional[dict[str, str]] = None) -> Graph:
         print("[manager-agent] decomposing job into a task graph...")
@@ -312,8 +308,8 @@ class ManagerAgent:
 
     def _call_llm(self, user_prompt: str, inputs: Optional[dict[str, str]] = None) -> Graph:
         messages = self._build_messages(user_prompt, inputs)
-        response = self._client.chat.completions.create(
-            model=_MODEL,
+        response = self._gateway.complete(
+            "planner",
             messages=messages,
             tools=[_CREATE_GRAPH_TOOL],
             tool_choice={"type": "function", "function": {"name": "create_graph"}},
@@ -335,8 +331,8 @@ class ManagerAgent:
                 ),
             }
         )
-        response = self._client.chat.completions.create(
-            model=_MODEL,
+        response = self._gateway.complete(
+            "planner",
             messages=messages,
             tools=[_CREATE_GRAPH_TOOL],
             tool_choice={"type": "function", "function": {"name": "create_graph"}},
@@ -386,8 +382,8 @@ class ManagerAgent:
                 ),
             },
         ]
-        response = self._client.chat.completions.create(
-            model=_MODEL,
+        response = self._gateway.complete(
+            "planner",
             messages=messages,
             temperature=0.0,
             max_tokens=200,
@@ -414,8 +410,8 @@ class ManagerAgent:
                 ),
             }
         )
-        response = self._client.chat.completions.create(
-            model=_MODEL,
+        response = self._gateway.complete(
+            "planner",
             messages=messages,
             tools=[_CREATE_GRAPH_TOOL],
             tool_choice={"type": "function", "function": {"name": "create_graph"}},

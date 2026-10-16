@@ -64,7 +64,7 @@ def _scale_keep(size: tuple[int, int], max_dim: int) -> tuple[int, int]:
 def _horizontal_text_score(gray: Image.Image) -> tuple[float, float]:
     """(row_variance, col_variance) of dark ink in a small grayscale image."""
     w, h = gray.size
-    pixels = list(gray.get_flattened_data())
+    pixels = list(gray.getdata())
     ink = [255 - p for p in pixels]
     rows: List[float] = []
     cols: List[float] = [0.0] * w
@@ -90,7 +90,10 @@ def _variance(values: List[float]) -> float:
 
 
 def _ink_fraction(gray: Image.Image) -> float:
-    pixels = list(gray.get_flattened_data())
+    # ``get_flattened_data`` was removed by newer Pillow releases. ``getdata``
+    # is stable across the supported Pillow versions and is already flat for
+    # the grayscale image produced by ``to_grayscale_thumb``.
+    pixels = list(gray.getdata())
     dark = sum(1 for p in pixels if p < _BINARIZE_THRESHOLD)
     return dark / len(pixels)
 
@@ -98,7 +101,7 @@ def _ink_fraction(gray: Image.Image) -> float:
 def _ink_centroid_row(gray: Image.Image) -> float:
     """Mean dark-pixel row (0 = top); tie-breaks +90 vs -90 rotation."""
     w, h = gray.size
-    pixels = list(gray.get_flattened_data())
+    pixels = list(gray.getdata())
     total = 0
     weighted = 0
     for y in range(h):

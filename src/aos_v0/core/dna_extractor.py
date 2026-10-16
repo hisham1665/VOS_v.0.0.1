@@ -21,11 +21,9 @@ heuristic produced nothing useful).
 """
 
 import json
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from groq import Groq
-
-from aos_v0.config import GROQ_API_KEY, make_groq
+from aos_v0.providers.gateway import ModelGateway
 from aos_v0.core.models import (
     CAPABILITY_FLAGS,
     ORDINAL_FIELDS,
@@ -190,12 +188,13 @@ class DNAExtractor:
         cheap_model: str = _CHEAP_MODEL,
         strong_model: str = _STRONG_MODEL,
         confidence_threshold: float = 0.7,
-        client: Optional[Groq] = None,
+        client: Optional[Any] = None,
     ) -> None:
         self.cheap_model = cheap_model
         self.strong_model = strong_model
         self.confidence_threshold = confidence_threshold
-        self._client = client or make_groq(GROQ_API_KEY)
+        self._client = client
+        self._gateway = None if client is not None else ModelGateway()
 
     # -- public API ---------------------------------------------------------
 
@@ -264,9 +263,7 @@ class DNAExtractor:
         tool call must degrade to escalation or heuristic, never kill the run.
         """
         try:
-            response = self._client.chat.completions.create(
-                model=model,
-                messages=[
+            messages = [
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {
                         "role": "user",
@@ -278,11 +275,24 @@ class DNAExtractor:
                             f"DEPENDS ON {len(node.depends_on)} upstream node(s)."
                         ),
                     },
-                ],
-                tools=[_EXTRACT_TOOL],
-                tool_choice={"type": "function", "function": {"name": "extract_dna"}},
-                temperature=0.0,
-            )
+                ]
+            if self._client is not None:
+                response = self._client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=[_EXTRACT_TOOL],
+                    tool_choice={"type": "function", "function": {"name": "extract_dna"}},
+                    temperature=0.0,
+                )
+            else:
+                role = "dna_strong" if model == self.strong_model else "dna"
+                response = self._gateway.complete(
+                    role,
+                    messages=messages,
+                    tools=[_EXTRACT_TOOL],
+                    tool_choice={"type": "function", "function": {"name": "extract_dna"}},
+                    temperature=0.0,
+                )
             payload = self._extract_fn_call(response)
             return self._build_dna(payload, extracted_by=model)
         except Exception as exc:  # noqa: BLE001 -- degradation is the contract

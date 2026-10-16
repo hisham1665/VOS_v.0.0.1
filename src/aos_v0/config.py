@@ -1,35 +1,30 @@
+"""Backward-compatible environment constants for older AOS integrations.
+
+The validated operator configuration lives in :mod:`aos_v0.settings`. These
+constants remain intentionally small so importing the package never creates a
+network client or requires an API key.
+"""
+
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
 
-import httpx
-
-
-def insecure_http_client() -> httpx.Client:
-    """Return an httpx client with SSL verification disabled.
-
-    This repo runs behind a proxy that terminates TLS with a self-signed
-    certificate, so the SDK defaults fail with CERTIFICATE_VERIFY_FAILED.
-    """
-    return httpx.Client(verify=False)
-
-
-def make_groq(api_key: str) -> "Groq":
-    """Build a Groq client that tolerates the local proxy's self-signed cert."""
-    from groq import Groq
-
-    return Groq(api_key=api_key, http_client=insecure_http_client())
-
 GROQ_API_KEY: str = os.environ.get("GROQ_API_KEY", "")
-
-# Hugging Face Inference Providers token. Prefer HF_TOKEN; fall back to the
-# legacy `HUG` key already present in this repo's .env so nothing breaks.
 HF_TOKEN: str = os.environ.get("HF_TOKEN") or os.environ.get("HUG", "")
-
-# Inference Providers routing: "auto" lets Hugging Face pick a provider, or
-# name one explicitly (e.g. "together", "nebius", "groq", ...).
 HF_PROVIDER: str = os.environ.get("HF_PROVIDER", "auto")
-
-# Default model id for HF-backed resources. Overridable per call / per resource.
 HF_MODEL: str = os.environ.get("HF_MODEL", "")
+_MODEL = os.environ.get("AOS_MODEL", "openai/gpt-oss-20b")
+DEFAULT_BUDGET_USD = 0.50
+AOS_MEMORY = os.environ.get("AOS_MEMORY", "on").lower() in {"1", "true", "yes", "on"}
+MEMORY_MAX_ENTRIES = 64
+MEMORY_MAX_TOTAL_BYTES = 512000
+MEMORY_MIN_SUBSTANCE_CHARS = 200
+AOS_MAX_WORKERS = max(1, int(os.environ.get("AOS_MAX_WORKERS", "4")))
+
+
+def make_groq(api_key: str):
+    """Legacy client factory; new code should use ``ModelGateway``."""
+    from groq import Groq
+    return Groq(api_key=api_key, timeout=90, max_retries=0)

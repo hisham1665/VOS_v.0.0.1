@@ -1,7 +1,7 @@
 Metadata-Version: 2.4
 Name: aos-v0
-Version: 0.0.5
-Summary: A capability-routed, auditable agent execution kernel
+Version: 1.0.0
+Summary: AOS core engine with an auditable paper-evaluation workflow
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
 Requires-Dist: pydantic<3.0,>=2.0
@@ -11,939 +11,297 @@ Requires-Dist: groq>=0.13.0
 Requires-Dist: openai>=1.0.0
 Requires-Dist: ddgs>=9.0.0
 Requires-Dist: huggingface_hub[inference]>=0.35.0
+Requires-Dist: pdfplumber>=0.11.0
+Requires-Dist: pypdfium2>=4.0.0
+Requires-Dist: Pillow>=10.0.0
+Requires-Dist: PyYAML>=6.0
 Provides-Extra: tui
 Requires-Dist: textual<2.0,>=0.58; extra == "tui"
 Requires-Dist: rich<15,>=13; extra == "tui"
 
-# AOS v0.1.0 — Adaptive Cognitive AI Microkernel
+# AOS 1.0 Paper Evaluation
 
-AOS (Adaptive Cognitive System) is a lightweight agentic framework that decomposes user prompts into task graphs — directed acyclic graphs (DAGs) of capability-routed nodes — and executes them concurrently in dependency-respecting waves.
+AOS (Adaptive Cognitive System) is a capability-routed, auditable orchestration
+kernel. This repository packages the updated AOS 1.0 core with a paper-
+evaluation domain for answer-sheet intake, OCR, question mapping, semantic
+marking, two-agent verification, review routing, batch processing, reporting,
+and reproducible research evaluation.
 
-AOS is designed as a minimal, composable, deterministic, and auditable microkernel. Each agent role has a focused responsibility, capabilities are independently implemented, and resource selection is separated from task planning through Capability DNA and a dedicated DNA Extractor.
+The evaluator is built **on top of AOS**. The kernel remains domain-neutral:
+it plans DAGs, selects resources with Capability DNA, executes dependency-ready
+work, records provenance, recovers from failures, and provides bounded memory.
+The `exam` package supplies paper-specific capabilities and evidence policy.
 
-## Table of Contents
+## What you can do
 
-- [Architecture](#architecture)
-- [Pipeline Flow](#pipeline-flow)
-- [Project Structure](#project-structure)
-- [Task Graph Model](#task-graph-model)
-- [Capability DNA](#capability-dna)
-- [Two-Stage Capability Binding](#two-stage-capability-binding)
-- [Components](#components)
-  - [Models (models.py)](#models-modelspy)
-  - [Manager Agent (agents/manager_agent.py)](#manager-agent-agentsmanager_agentpy)
-  - [DNA Extractor](#dna-extractor)
-  - [Capability Registry](#capability-registry)
-  - [Graph Executor (agents/graph_executor.py)](#graph-executor-agentsgraph_executorpy)
-  - [Sub-Agent (agents/sub_agent.py)](#sub-agent-agentssub_agentpy)
-  - [Integrator Agent (agents/integrator_agent.py)](#integrator-agent-agentsintegrator_agentpy)
-- [Capabilities](#capabilities)
-- [Graph Utilities (graph_utils.py)](#graph-utilities-graph_utilspy)
-- [Diagram Utilities (diagram_utils.py)](#diagram-utilities-diagram_utilspy)
-- [Execution Model: Waves](#execution-model-waves)
-- [Multi-Parent Merging](#multi-parent-merging)
-- [Semantic Completeness Verification](#semantic-completeness-verification)
-- [Deterministic Diagrams](#deterministic-diagrams)
-- [Auditability and Logging](#auditability-and-logging)
-- [Installation & Setup](#installation--setup)
-- [Usage](#usage)
-- [Configuration](#configuration)
-- [Design Decisions](#design-decisions)
-- [Upgrade Path](#upgrade-path)
+- Define an exam, answer key, rubric, partial-credit rules, and marking policy in JSON or YAML.
+- Evaluate one PDF/image answer sheet or a folder/ZIP of sheets.
+- Handle printed and handwritten-oriented OCR adapters, layout, identity, and question segmentation.
+- Grade conceptual meaning and paraphrases instead of relying only on exact wording.
+- Run independent primary and verifier agents and route disagreements to review.
+- Preserve OCR confidence, extracted answers, agent verdicts, selected resources, recovery attempts, and final marks.
+- Resume interrupted batches from an atomic checkpoint.
+- Export CSV, JSON, student reports, class analytics, and benchmark metrics.
+- Run the local structural path without an API key; configure Groq, OpenAI-compatible, Ollama, or Hugging Face resources when needed.
 
-## Architecture
+## Quick start
 
-AOS separates planning, requirement extraction, resource selection, and execution.
+### 1. Install
 
-```
-                         User Prompt
-                              │
-                              ▼
-                    ┌─────────────────────┐
-                    │    Manager Agent    │
-                    │                     │
-                    │ Decomposes prompt   │
-                    │ into task graph     │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │ Structural +        │
-                    │ Semantic Validation │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │    DNA Extractor    │
-                    │                     │
-                    │ Task → Capability   │
-                    │ DNA requirement     │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │ Capability Registry │
-                    │                     │
-                    │ Feasibility Filter  │
-                    │         ↓           │
-                    │ Pareto Scoring      │
-                    │         ↓           │
-                    │ Resource Binding    │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │   Graph Executor    │
-                    │                     │
-                    │ Topological waves   │
-                    │ Concurrent execution│
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │     Sub-Agents      │
-                    │                     │
-                    │ Execute bound       │
-                    │ capabilities       │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                    ┌─────────────────────┐
-                    │  Integrator Agent   │
-                    │                     │
-                    │ Collects sink nodes │
-                    │ and builds output   │
-                    └──────────┬──────────┘
-                               │
-                               ▼
-                         Final Output
-```
+Python 3.11+ is required.
 
-The key architectural principle in v0.1.0 is:
-
-> The Manager decides what needs to be done; the DNA Extractor describes what resources are required; the Capability Registry decides how it should be performed.
-
-## Pipeline Flow
-
-1. **User input** — A text prompt and optionally an `--image` path are supplied.
-
-2. **Task decomposition** — The Manager Agent sends the prompt to the configured LLM and produces a Graph consisting of task nodes and dependency edges.
-
-3. **Structural validation** — `validate_graph()` checks the generated graph for:
-   - Duplicate node IDs
-   - Dangling dependencies
-   - Missing roots
-   - Cycles
-   - Invalid graph structure
-
-   The Manager can retry graph generation when validation fails.
-
-4. **Semantic completeness verification** — A separate LLM-based check verifies that all important named entities in the job are represented by appropriate task nodes. If the graph is incomplete, it can be regenerated.
-
-5. **Plan generation** — A deterministic execution plan is written to `data/outputs/plan.md`, including:
-   - Node table
-   - Dependencies
-   - Execution waves
-   - Capability information
-   - Mermaid graph
-
-6. **Capability DNA extraction** — After planning, the DNA Extractor independently converts each subtask into a typed capability requirement vector.
-
-7. **Resource feasibility filtering** — The Capability Registry removes resources that cannot satisfy the node's required capability flags or constraints.
-
-8. **Resource scoring** — Feasible resources are ranked using the Pareto scoring function:
-
-   ```
-   score = quality_prior − λ·cost − μ·latency
-   ```
-
-   Cost and latency are normalized against the requirements of the individual subtask.
-
-9. **Capability binding** — The highest-scoring feasible resource is selected for the node. The runner-up margin and rejected-resource reasons are recorded for auditability.
-
-10. **Wave execution** — The Graph Executor topologically sorts the graph into dependency waves. Independent nodes in the same wave execute concurrently.
-
-11. **Multi-parent input merging** — Nodes with multiple dependencies receive labeled outputs from all completed parents.
-
-12. **Vision context propagation** — When a vision node is present, its identification output is injected into downstream non-vision tasks so image-derived context is not lost through intermediate processing.
-
-13. **Integration** — The Integrator Agent collects sink-node outputs and combines them into the final response.
-
-## Project Structure
-
-A typical AOS project is organized around a small set of focused components:
-
-```
-AOS/
-├── src/aos_v0/
-│   ├── cli.py
-│   ├── config.py
-│   ├── core/          # models, graph logic, policies, registry
-│   ├── agents/        # planning, execution, integration
-│   ├── capabilities/  # concrete task capabilities
-│   ├── providers/     # external model/provider adapters
-│   └── services/      # registry construction and export
-├── data/
-│   ├── inputs/        # user-provided files
-│   └── outputs/       # generated plans and artifacts
-├── docs/              # architecture and implementation documents
-├── pyproject.toml
-├── requirements.txt
-└── README.md
-```
-
-The exact module layout may evolve, but the architectural separation remains:
-
-- **Agents** orchestrate work.
-- **Models** define the typed data structures.
-- **Capabilities** perform concrete work.
-- **DNA extraction** defines resource requirements.
-- **Capability Registry** performs resource selection.
-- **Graph utilities** validate and analyze DAGs.
-- **Diagram utilities** generate deterministic visualizations.
-
-## Task Graph Model
-
-AOS represents every job as a directed acyclic graph.
-
-### Node
-
-A node represents one unit of work.
-
-Each node contains information such as:
-
-| Field          | Purpose                                      |
-|----------------|----------------------------------------------|
-| `id`           | Unique node identifier                       |
-| `description`  | Task instruction                             |
-| `capability`   | Coarse capability hint                       |
-| `capability_dna`| Typed resource requirements                 |
-| `depends_on`   | IDs of prerequisite nodes                    |
-| `input`        | Runtime input                                |
-| `output`       | Produced result                              |
-| `status`       | Execution state                              |
-| `performed_by` | Selected resource/capability                 |
-
-The coarse capability field provides a high-level hint such as:
-- `web_search`
-- `summarization`
-- `vision`
-
-The Capability DNA provides the more precise resource requirements used during capability binding.
-
-### Edge
-
-An edge represents a dependency.
-
-For example:
-```
-C depends_on A and B
-```
-means C cannot execute until both A and B complete.
-
-```
-A ──► C
-B ──► C
-```
-
-The outputs from A and B are then merged and supplied to C.
-
-## Capability DNA
-
-AOS v0.1.0 separates task planning from resource selection.
-
-The Manager Agent is responsible for determining what work is required. It does not need to decide which concrete resource should perform that work.
-
-The DNA Extractor converts each planned subtask into a typed requirement vector with three logical segments:
-
-```
-Capability DNA
-├── flags
-├── ordinals
-└── constraints
-```
-
-### Flags
-
-Discrete capability requirements describing what a resource must be able to do.
-
-Examples include:
-- `web_access`
-- `summarization`
-- `vision`
-- `structured_output`
-
-A resource must provide every required flag to pass the feasibility stage.
-
-### Ordinals
-
-Ordinal requirements describe task difficulty or capability level on a bounded scale.
-
-AOS uses a difficulty range of:
-```
-0 ─────────────── 4
-easy              hard
-```
-
-These values allow the registry to distinguish between resources with different capability levels.
-
-### Constraints
-
-Constraints describe the operational requirements for the task.
-
-The v0.1.0 model includes:
-- Cost ceiling
-- Latency SLO
-- Minimum quality
-- Risk tolerance
-
-A resource that violates a hard constraint is rejected before scoring.
-
-### Adaptive extraction
-
-The DNA Extractor uses a two-tier strategy:
-
-```
-Task
- │
- ▼
-Cheap model
- │
- ├── confidence ≥ threshold ──► Accept DNA
- │
- └── confidence < threshold
-             │
-             ▼
-        Strong model
-             │
-             ▼
-          Final DNA
-```
-
-This keeps routine requirement extraction inexpensive while allowing difficult or ambiguous tasks to receive stronger reasoning.
-
-## Two-Stage Capability Binding
-
-AOS v0.1.0 uses a two-stage resource-selection process.
-
-### Stage 1 — Feasibility Filtering
-
-The Capability Registry first eliminates resources that cannot satisfy the DNA.
-
-A candidate must:
-- Provide every required capability flag.
-- Meet the cost ceiling.
-- Meet the latency SLO.
-- Meet the minimum quality requirement.
-- Respect the required risk tolerance.
-
-Conceptually:
-```
-All Registered Resources
-          │
-          ▼
-   Capability Flags
-          │
-          ▼
-   Constraint Checks
-          │
-          ▼
- Feasible Resources
-```
-
-This prevents unsuitable resources from winning simply because they have a high score in another dimension.
-
-### Stage 2 — Pareto Scoring
-
-Only feasible resources are scored.
-
-The current scoring model is:
-```
-score = quality_prior − λ·cost − μ·latency
-```
-where:
-- `quality_prior` represents the expected quality of the resource.
-- `cost` represents normalized resource cost.
-- `latency` represents normalized latency.
-- `λ` controls the cost penalty.
-- `μ` controls the latency penalty.
-
-Cost and latency are normalized relative to the requirements of the current subtask rather than using a single global scale.
-
-The highest-scoring feasible resource becomes the selected resource.
-
-## Components
-
-### Models (models.py)
-
-Pydantic models provide the type system for task graphs and their execution state.
-
-The core models include:
-
-| Model                | Purpose                              |
-|----------------------|--------------------------------------|
-| `Node`               | Represents an individual task        |
-| `Graph`              | Represents the complete DAG          |
-| `Capability DNA model` | Represents typed resource requirements |
-
-A `Node` combines the original task information with its extracted Capability DNA and execution metadata.
-
-### Manager Agent (agents/manager_agent.py)
-
-The Manager Agent is responsible for planning, not resource selection.
-
-Its responsibilities include:
-
-- **Graph generation** – Converts the user prompt into a DAG. Creates individual nodes for required subtasks. Preserves parallelism where possible. Adds vision processing when an image is supplied.
-- **Structural validation** – Detects duplicate IDs, dangling dependencies, missing roots, and cycles.
-- **Semantic completeness** – Checks whether named entities and required concepts have dedicated tasks. Regenerates the graph when the semantic audit reports incompleteness.
-- **Plan artifact generation** – Writes `data/outputs/plan.md`. Produces node tables, wave breakdowns, and deterministic Mermaid diagrams.
-- **Separation of concerns** – The Manager describes the work. It does not choose the concrete resource that performs each task.
-
-### DNA Extractor
-
-The DNA Extractor runs after task decomposition.
-
-Its purpose is to translate:
-```
-Natural-language subtask
-          │
-          ▼
-Typed Capability DNA
-```
-
-For every node, the extractor identifies:
-- Required capability flags
-- Difficulty/ability ordinals
-- Cost ceiling
-- Latency SLO
-- Minimum quality
-- Risk tolerance
-
-The extractor uses a cheap model by default and escalates to a stronger model when confidence is below the configured threshold.
-
-This allows planning and resource selection to remain independent.
-
-### Capability Registry
-
-The Capability Registry maintains the available resources and performs runtime binding.
-
-For each node it:
-- Reads the node's Capability DNA.
-- Applies the feasibility filter.
-- Rejects incompatible resources.
-- Scores all feasible resources.
-- Selects the highest-scoring candidate.
-- Records the runner-up and score margin.
-- Records why rejected resources were filtered.
-
-The Registry therefore acts as the bridge between:
-
-```
-Task requirements
-        │
-        ▼
-Capability DNA
-        │
-        ▼
-Available resources
-        │
-        ▼
-Selected resource
-```
-
-### Graph Executor (agents/graph_executor.py)
-
-The Graph Executor is responsible for execution rather than planning.
-
-It:
-- Topologically sorts the graph.
-- Groups nodes into dependency waves.
-- Executes independent nodes concurrently.
-- Waits for parent nodes before executing children.
-- Merges parent outputs.
-- Propagates vision context to downstream tasks.
-
-Independent nodes are executed using a thread pool.
-
-### Sub-Agent (agents/sub_agent.py)
-
-A Sub-Agent executes an individual graph node.
-
-Its responsibilities include:
-- Receiving the node's task and runtime input.
-- Using the resource selected by the Capability Registry.
-- Invoking the appropriate capability.
-- Recording the result.
-- Updating node execution metadata.
-
-This keeps individual task execution isolated from global graph orchestration.
-
-### Integrator Agent (agents/integrator_agent.py)
-
-The Integrator Agent produces the final result from completed graph branches.
-
-A sink node is a node that has no downstream dependents.
-
-The Integrator:
-- Identifies sink nodes.
-- Collects their outputs.
-- Labels each output.
-- Combines them into the final response.
-
-This allows independent branches of a graph to contribute to the final answer.
-
-## Capabilities
-
-Capabilities are standalone functions responsible for concrete operations.
-
-The baseline capabilities include:
-- `web_search`
-- `summarization`
-- `vision`
-
-The architecture is intentionally extensible. New capabilities can be registered without changing the fundamental graph execution model.
-
-## Graph Utilities (graph_utils.py)
-
-Graph utilities provide deterministic graph operations such as:
-- Structural validation
-- Cycle detection
-- Dependency analysis
-- Root detection
-- Sink detection
-- Wave construction
-
-These operations are kept outside the LLM so graph correctness does not depend on generated text.
-
-## Diagram Utilities (diagram_utils.py)
-
-Diagram utilities generate Mermaid diagrams directly from the validated graph.
-
-The LLM does **not** generate the diagram.
-
-This ensures the visualization represents the actual graph rather than a model-generated approximation.
-
-## Execution Model: Waves
-
-AOS executes DAGs in dependency-respecting waves.
-
-Consider:
-```
-      A       B
-       \     /
-        \   /
-          C
-         / \
-        D   E
-```
-The execution becomes:
-```
-Wave 0: A, B
-Wave 1: C
-Wave 2: D, E
-```
-Nodes inside the same wave have no unresolved dependencies and can execute concurrently.
-
-This provides parallel execution while preserving dependency correctness.
-
-### Example
-
-```mermaid
-flowchart TD
-    subgraph Wave 0
-        a["Research solar energy (web_search)"]
-        b["Research wind energy (web_search)"]
-    end
-
-    subgraph Wave 1
-        c["Summarize solar (summarization)"]
-        d["Summarize wind (summarization)"]
-    end
-
-    subgraph Wave 2
-        e["Compare summaries (summarization)"]
-    end
-
-    a --> c
-    b --> d
-    c --> e
-    d --> e
-
-    classDef web_searchStyle fill:#4CAF50,color:#fff
-    classDef summarizationStyle fill:#2196F3,color:#fff
-
-    class a web_searchStyle
-    class b web_searchStyle
-    class c summarizationStyle
-    class d summarizationStyle
-    class e summarizationStyle
-```
-
-Here:
-- `a` and `b` execute concurrently.
-- `c` and `d` execute concurrently after their respective parents finish.
-- `e` waits for both summaries.
-
-## Multi-Parent Merging
-
-A node can depend on multiple parents.
-
-For example:
-```
-Research A ──►
-              \
-               ► Compare
-              /
-Research B ──►
-```
-The Compare node receives labeled outputs from both parents.
-
-Conceptually:
-```
-[A output]
-[B output]
-```
-This allows downstream nodes to:
-- Compare results.
-- Combine information.
-- Reconcile conflicting outputs.
-- Perform cross-source analysis.
-
-Parent outputs are therefore preserved rather than arbitrarily selecting one branch.
-
-## Semantic Completeness Verification
-
-Structural validity alone does not guarantee that a graph represents the user's intent.
-
-A graph may be a valid DAG while still omitting an important entity from the original request.
-
-AOS therefore performs a separate semantic completeness check.
-
-For example, if the prompt requests:
-> Compare Apple, Microsoft, and Google.
-
-the planner should produce dedicated work for all three entities rather than collapsing them into a single generic research task.
-
-The completeness verifier audits the generated graph and reports a status such as:
-```
-[manager-agent] completeness check: COMPLETE
-```
-or:
-```
-[manager-agent] completeness check: INCOMPLETE
-```
-When incomplete, the Manager can regenerate the graph.
-
-## Deterministic Diagrams
-
-AOS deliberately keeps diagram generation outside the LLM.
-
-The process is:
-```
-Validated Graph
-      │
-      ▼
-diagram_utils.build_mermaid()
-      │
-      ▼
-Deterministic Mermaid Diagram
-```
-
-The generated diagram reflects:
-- Actual nodes
-- Actual dependency edges
-- Actual execution waves
-- Actual capability types
-
-This prevents the LLM from inventing, omitting, or misrepresenting graph structure in the visual artifact.
-
-## Auditability and Logging
-
-AOS v0.1.0 expands auditability beyond graph execution.
-
-For capability binding, the system records:
-- Selected resource
-- Winning score
-- Runner-up resource
-- Runner-up score
-- Winner/runner-up margin
-- Resources rejected during feasibility filtering
-- Reason each resource was rejected
-- Relevant DNA requirements
-- Binding decisions
-
-This makes resource selection explainable.
-
-A simplified decision trace looks like:
-```
-Node: summarize_solar
-
-DNA:
-  flags       = [summarization]
-  difficulty  = 2
-  cost_max    = ...
-  latency_slo = ...
-  min_quality = ...
-  risk        = ...
-
-Feasibility:
-  Resource A → ACCEPT
-  Resource B → REJECT: latency SLO violated
-  Resource C → REJECT: missing required flag
-
-Scoring:
-  Resource A → 0.82
-
-Selected:
-  Resource A
-
-Runner-up:
-  Resource D
-
-Margin:
-  0.11
-```
-
-The goal is to make both *what* AOS did and *why* AOS selected a particular resource inspectable.
-
-## Installation & Setup
-
-Clone the repository and install the project's dependencies according to the environment configuration.
-
-For example:
 ```bash
-git clone <repository>
-cd AOS
+git clone <your-repository-url>
+cd evalAos
+python -m venv .venv
+
+# Linux/macOS
+source .venv/bin/activate
+
+# Windows PowerShell
+# .venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
 python -m pip install -e .
 ```
 
-Configure the required model/provider credentials through environment variables or the project's configuration mechanism.
-
-For example:
-```bash
-export GROQ_API_KEY="your-api-key"
-```
-
-Do not commit API keys or other credentials to the repository.
-
-## Usage
-
-Install the package first; this project uses the standard `src/` layout, so
-the package is not importable from the repository root until the editable
-installation is complete.
-
-A typical AOS invocation accepts a natural-language task:
-```bash
-python -m aos_v0 "Compare solar and wind energy"
-```
-
-For image-aware tasks:
-```bash
-python -m aos_v0 "Identify the object and research it" --image data/inputs/image.jpg
-```
-
-The execution produces a task graph, validates it, extracts Capability DNA, binds suitable resources, executes the graph, and integrates the final results.
-
-The generated execution plan is written to:
-```
-data/outputs/plan.md
-```
-
-## Interactive TUI and artifacts
-
-Install the optional terminal UI dependencies, then start the event-driven
-interactive client:
+For the optional terminal UI:
 
 ```bash
 python -m pip install -e ".[tui]"
-aos-tui
 ```
 
-The primary interaction is natural language. Upload files before a request:
+### 2. Configure
+
+The repository includes a safe `aos.yaml` with local-first defaults. Copy the
+environment template and add only the credentials you intend to use:
+
+```bash
+cp .env.example .env
+```
+
+The paper evaluator's local OCR and structural engines do not need a provider
+key. API keys are needed only for model-backed general AOS capabilities or for
+custom configured capabilities.
+
+- `GROQ_API_KEY` — Groq planner/text/audio profiles.
+- `OPENAI_API_KEY` — OpenAI-compatible profile when selected in YAML.
+- `HF_TOKEN` — optional Hugging Face catalog.
+- `AOS_CONFIG=/path/to/profile.yaml` — optional alternate configuration.
+- `AOS_MEMORY=off` — disable general AOS shared memory for a run.
+
+Never commit `.env` or real credentials.
+
+### 3. Create and validate an exam
+
+```bash
+aos exam init --out exam.json
+aos exam validate exam.json
+```
+
+Edit `exam.json` or copy the complete example at
+[`examples/sample_exam.json`](examples/sample_exam.json). A question normally
+contains `text`, `max_marks`, an `answer_key`, and a `rubric`:
+
+```json
+{
+  "question_id": "Q1",
+  "text": "Explain reliable transport.",
+  "max_marks": 5,
+  "answer_key": {
+    "reference_answers": ["A connection-oriented protocol ..."],
+    "expected_concepts": ["connection-oriented", "reliable delivery"],
+    "accepted_alternatives": ["reliable connection"],
+    "keywords": ["acknowledgement"]
+  },
+  "rubric": {
+    "criteria": [
+      {"criterion": "connection", "marks": 2},
+      {"criterion": "reliability", "marks": 3}
+    ]
+  }
+}
+```
+
+The answer key describes knowledge, not one exact sentence. The evaluator can
+therefore award credit for a valid paraphrase while retaining evidence for a
+reviewer.
+
+### 4. Evaluate one paper
+
+```bash
+aos exam evaluate exam.json data/inputs/student_001.pdf \
+  --out data/outputs/student_001.json
+```
+
+The command prints the status, marks, and confidence and writes the complete
+evidence record. A low-confidence or ambiguous paper is marked `review`; it is
+not silently converted to an automatic zero.
+
+### 5. Evaluate a batch
+
+```bash
+aos exam batch exam.json scans/ \
+  --workers 4 \
+  --checkpoint data/outputs/batch_checkpoint.json \
+  --results data/outputs/results.jsonl
+```
+
+Run the same command again to resume. Completed papers are not re-graded. Use
+`--status` to inspect a checkpoint without running the batch and `--force` to
+intentionally reprocess completed papers.
+
+### 6. Generate reports
+
+```bash
+aos exam report exam.json data/outputs/results.jsonl --out reports
+```
+
+Reports include:
+
+- `student_results.csv`
+- `detailed_evaluation.csv`
+- `issues.csv`
+- `results.json`
+- `class_analytics.txt`
+- `batch_report.txt`
+- one text report per student under `reports/`
+
+### 7. Run paper-evaluation research
+
+Generate a starter ground-truth dataset and run the built-in experiments:
+
+```bash
+aos exam benchmark exam.json \
+  --sample-dataset benchmark_dataset \
+  --out research
+```
+
+For a real paper-evaluation study, edit `benchmark_dataset/entries.jsonl` with
+human marks and run:
+
+```bash
+aos exam benchmark exam.json \
+  --dataset benchmark_dataset \
+  --out research \
+  --throughput 100
+```
+
+The research output includes evaluation metrics, experiment results, and
+`BENCHMARK_REPORT.md`. The supplied sample dataset is a smoke-test fixture, not
+a scientific ground truth set.
+
+## General AOS usage
+
+The original general-purpose graph engine remains available:
+
+```bash
+aos "Summarize this report" --input report.pdf
+aos --config profiles/local.yaml --no-memory "Describe the image" --image page.png
+```
+
+The general pipeline is:
 
 ```text
-AOS › /upload research.pdf diagram.png recording.wav
-AOS › Analyze the paper and explain the diagram.
+request -> manager DAG -> structural validation -> Capability DNA
+        -> constraint policy -> registry selection -> dependency-ready waves
+        -> bounded recovery -> integrator -> auditable output
 ```
 
-`ArtifactManager` stores uploads in `data/artifacts/` and standardizes each as
-an `Artifact` with an ID, category, MIME type, size, path and metadata. The
-interactive service creates a `RequestContext` containing selected artifact
-references and passes it into the unchanged planning/DNA/routing/execution
-kernel. The Textual UI only renders `OrchestrationEvent` messages emitted by
-that kernel; it never makes routing decisions.
+Independent nodes run concurrently up to `runtime.max_workers`. Every node
+records its capability, selected resource, routing mode, status, and failure or
+recovery information. The registry scores resources on capability fit,
+reasoning demand, cost, latency, quality, availability, and recent transport
+health.
 
-Commands: `/help`, `/clear`, `/history`, `/session`, `/status`, `/agents`,
-`/capabilities`, `/files`, `/upload`, `/config`, and `/quit`.
+## Configuration guide
 
-Current kernel support for direct media execution remains image and audio,
-matching the registered capabilities. Documents, datasets, archives and video
-are accepted and retained as standardized context, but require a corresponding
-registered parsing capability before AOS can process their binary contents.
+### `aos.yaml`
 
-## Configuration
+`aos.yaml` contains operational policy and model profiles. Important sections:
 
-The v0.1.0 architecture introduces configuration points for capability selection in addition to the existing execution settings.
+| Section | Purpose |
+| --- | --- |
+| `runtime` | workers, timeouts, retries, graph limits, output/log directories |
+| `memory` | bounded shared-memory and exact-reuse policy for general AOS |
+| `models` | provider, model, secret environment variable, endpoint, token limit |
+| `capabilities` | optional operator-defined Python or chat capabilities |
 
-Important configuration concepts include:
+Example custom deterministic capability:
 
-| Setting                    | Purpose                                      |
-|----------------------------|----------------------------------------------|
-| DNA extraction model       | Model used for requirement extraction        |
-| DNA escalation threshold   | Confidence threshold for strong-model escalation |
-| Cost ceiling               | Maximum acceptable resource cost             |
-| Latency SLO                | Maximum acceptable latency                   |
-| Minimum quality            | Minimum resource quality requirement         |
-| Risk tolerance             | Maximum acceptable operational risk          |
-| λ                          | Cost penalty in resource scoring             |
-| μ                          | Latency penalty in resource scoring          |
-
-The exact configuration mechanism depends on the project environment.
-
-## Design Decisions
-
-### Planning and resource selection are separate
-- The Manager Agent answers: *What needs to be done?*
-- The DNA Extractor answers: *What kind of resource is required?*
-- The Capability Registry answers: *Which available resource should perform it?*
-
-This separation prevents task planning from becoming tightly coupled to a particular model or tool.
-
-### Feasibility before optimization
-A resource should not win merely because it scores well if it violates a hard requirement.
-
-Therefore:
-```
-Filter first → Score second
-```
-is preferred over scoring every resource indiscriminately.
-
-### Per-task normalization
-Cost and latency are normalized relative to the individual task's requirements. This avoids treating all tasks as though they have identical performance expectations.
-
-### Cheap-first DNA extraction
-Most subtasks do not require expensive reasoning to classify. The DNA Extractor therefore uses a cheap model first and escalates only when confidence is insufficient.
-
-### Deterministic graph operations
-Graph validation, wave construction, dependency handling, and diagram generation are implemented deterministically rather than delegated to the LLM.
-
-### Concurrent execution
-Independent nodes should execute concurrently whenever dependencies allow it. This reduces unnecessary wall-clock execution time while preserving DAG semantics.
-
-### Explicit audit trails
-Capability binding decisions are recorded so that resource selection can be inspected and debugged after execution.
-
-## Upgrade Path
-
-AOS v0.1.0 establishes the foundation for increasingly sophisticated resource-aware execution.
-
-Potential future extensions include:
-- Additional capability types.
-- Richer Capability DNA schemas.
-- More advanced multi-objective/Pareto selection.
-- Resource health and availability tracking.
-- Dynamic resource registration.
-- Historical performance priors.
-- Adaptive cost/latency weights.
-- Persistent execution traces.
-- More sophisticated retry and fallback policies.
-- Capability composition.
-- Distributed graph execution.
-- Resource-aware scheduling across waves.
-
-The central architecture remains:
-```
-Prompt
-  │
-  ▼
-Task Graph
-  │
-  ▼
-Capability DNA
-  │
-  ▼
-Feasibility Filtering
-  │
-  ▼
-Pareto Resource Selection
-  │
-  ▼
-Concurrent DAG Execution
-  │
-  ▼
-Integrated Result
+```yaml
+capabilities:
+  spreadsheet_reader:
+    handler: python
+    callable: my_adapters.spreadsheets:read
+    flags: [document.extraction, data.tabular]
+    input_type: document
+    output_type: structured
+    quality: 0.9
 ```
 
-AOS v0.1.0 therefore moves the system from a capability-routed task executor toward a resource-aware adaptive cognitive microkernel, while retaining the original principles of composability, determinism, concurrency, and auditability.
+The adapter accepts `(input, instruction=None)` and returns text, a mapping
+with `text`, or a result object with `.text`. Namespaced dotted flags let a
+domain add capabilities without editing the kernel vocabulary.
 
-## How AOS v0.0.3 plans and executes tasks
+See [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for provider profiles and
+[`docs/PAPER_EVALUATION_GUIDE.md`](docs/PAPER_EVALUATION_GUIDE.md) for the full
+paper workflow.
 
-AOS decomposes a user job into a **task graph** — a directed acyclic graph
-(DAG) of **nodes** connected by **edges**.
+## Output and privacy
 
-- **Node:** a single unit of work. Each node has a unique `id`, a `description`
-  (which doubles as the instruction passed to its capability), a `capability`
-  (the coarse tool hint, e.g. `web_search`, `summarization`, or `vision`), a
-  **Capability DNA** vector, and a `depends_on` list of node ids it must wait
-  for.
-- **Edge:** a dependency from one node to another. If node C has
-  `depends_on: ["a", "b"]`, it runs only after both A and B finish, and
-  receives their outputs as input.
+Generated plans and reports go under `data/outputs/` or the path supplied on
+the command line. Runtime logs go under `log/`. The general shared memory is
+bounded and request-scoped by default; its decision log is off by default.
+Paper results intentionally contain answer evidence because that is required
+for audit and human review. Treat result files and logs as assessment data.
 
-**Capability DNA (DOC1 §5.2):** planning and resource selection are separate
-passes. The Manager Agent only decomposes; a dedicated **DNA Extractor** then
-maps each subtask to a typed requirement vector with three segments —
-discrete capability `flags`, `ordinals` scoring difficulty 0–4, and
-`constraints` (cost ceiling, latency SLO, min quality, risk tolerance). The
-extractor runs a cheap model first and escalates to a strong one only when its
-self-reported confidence falls below threshold.
+## Project layout
 
-**Two-stage binding (DOC1 M5):** for each node the Capability Registry first
-applies a **feasibility filter** — a resource must provide every flag in the
-DNA and satisfy all four constraints — then scores the survivors with a Pareto
-scorer, `score = quality_prior − λ·cost − μ·latency`, with cost and latency
-normalised against that subtask's own ceiling and SLO. The winner, the
-runner-up margin, and the reason each rejected resource was filtered are all
-logged.
-
-**Concurrency:** nodes in the same dependency "wave" are independent and run
-concurrently via threads. For example, in the graph below, nodes `a` and `b`
-run in parallel, then `c` and `d` run in parallel, and finally `e` runs.
-
-**Multi-parent merging:** a node with multiple parents receives the labeled,
-concatenated outputs of all its parents, so it can compare, combine, or
-reconcile them.
-
-**Diagrams:** the Mermaid diagrams in `data/outputs/plan.md` are generated
-deterministically from the validated graph by `diagram_utils.build_mermaid()`,
-not by the LLM. This is a deliberate reliability choice — the diagram always
-faithfully represents the actual graph structure, wave assignments, and
-capability types, with no risk of the LLM inventing or omitting nodes.
-
-```mermaid
-flowchart TD
-    subgraph Wave 0
-        a["Research solar energy (web_search)"]
-        b["Research wind energy (web_search)"]
-    end
-    subgraph Wave 1
-        c["Summarize solar (summarization)"]
-        d["Summarize wind (summarization)"]
-    end
-    subgraph Wave 2
-        e["Compare summaries (summarization)"]
-    end
-    a --> c
-    b --> d
-    c --> e
-    d --> e
-
-    classDef web_searchStyle fill:#4CAF50,color:#fff
-    classDef summarizationStyle fill:#2196F3,color:#fff
-    class a web_searchStyle
-    class b web_searchStyle
-    class c summarizationStyle
-    class d summarizationStyle
-    class e summarizationStyle
+```text
+src/aos_v0/
+├── core/          # AOS 1.0 models, registry, scheduler, recovery, memory
+├── agents/        # planning, execution, integration
+├── capabilities/  # general built-in capabilities
+├── providers/     # lazy provider gateways and adapters
+├── services/      # resource registration and exports
+└── exam/          # paper-evaluation domain and CLI
+data/              # inputs, artifacts, generated outputs
+docs/              # architecture, configuration, and usage guides
+examples/          # exam configuration examples
+tests/             # kernel and evaluator regression tests
 ```
+
+## Verification
+
+Install dependencies first, then run:
+
+```bash
+python -m compileall -q src
+python -m pytest -q
+```
+
+If you want to verify only the configuration and local CLI path:
+
+```bash
+aos exam validate examples/sample_exam.json
+aos exam --help
+```
+
+## Architecture and upgrade notes
+
+The previous AOS 1.0 core in `../AOS_v1.0.0` was used as the upgrade reference.
+The current repository retains the evaluator's domain contracts and adds the
+core improvements as compatible services:
+
+- YAML-validated settings with environment-only secrets.
+- Lazy, provider-neutral model gateway with bounded network settings.
+- Performance-aware capability routing and deterministic tie-breaking.
+- Typed artifact extensions and structured task understanding metadata.
+- Bounded selective memory with key-first retrieval and exact reuse.
+- Dependency-ready execution with bounded workers and per-branch failure isolation.
+- A guided exam CLI that makes the evaluation and research workflow reproducible.
+
+See [`docs/AOS_1.0_UPGRADE.md`](docs/AOS_1.0_UPGRADE.md) for the integration
+contract and [`docs/AOS_INTEGRATION_SPEC.md`](docs/AOS_INTEGRATION_SPEC.md) for
+the evaluator/kernel boundary.

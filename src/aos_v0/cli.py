@@ -1,6 +1,7 @@
 import re
 import sys
 import time
+import os
 from pathlib import Path
 
 from aos_v0.agents.graph_executor import GraphExecutor
@@ -14,6 +15,8 @@ from aos_v0.core.models import Artifact
 from aos_v0.core.runtime import RequestContext
 from aos_v0.logbook import SessionLogger
 from aos_v0.services.resource_registration import build_hf_enabled_registry
+from aos_v0.settings import load_settings
+from aos_v0.core.models import TaskUnderstanding
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -31,6 +34,7 @@ def run(
     budget_usd: float = DEFAULT_BUDGET_USD,
     context: RequestContext | None = None,
     event_sink=None,
+    session_bank=None,
 ) -> str:
     """Execute the established kernel, optionally publishing real lifecycle events.
 
@@ -44,6 +48,18 @@ def run(
     with SessionLogger(prompt=user_prompt, tag="run") as _logger:
         request_id = context.request_id if context else ""
         started = time.monotonic()
+        settings = load_settings()
+        memory_bank = None
+        if settings.memory.enabled and os.environ.get("AOS_MEMORY", "on").lower() in {"1", "true", "yes", "on"}:
+            from aos_v0.core.shared_memory import SharedMemoryBank
+
+            memory_bank = SharedMemoryBank(
+                request_id or f"request-{int(time.time())}",
+                session_bank,
+                max_entries=settings.memory.max_entries,
+                max_value_bytes=settings.memory.max_value_bytes,
+                max_total_bytes=settings.memory.max_total_bytes,
+            )
 
         def emit(kind: EventType, **payload) -> None:
             if event_sink:
@@ -57,6 +73,14 @@ def run(
         # and the kernel appends the terminal synthesis node itself.
         manager = ManagerAgent()
         graph = manager.create_plan(user_prompt, inputs)
+        graph.task = TaskUnderstanding(
+            intent=user_prompt,
+            domain=context.metadata.get("domain", "general") if context else "general",
+            evidence=[{"type": key, "path": value} for key, value in (inputs or {}).items()],
+            available_capabilities={m.resource_id: list(m.capabilities) for m in registry.routable_manifests()},
+            budget_usd=budget_usd,
+            max_elapsed_s=settings.runtime.max_elapsed_s,
+        )
         if context:
             graph.artifacts.update({artifact.id: artifact for artifact in context.artifacts})
         emit(EventType.INTENT_DETECTED, planned_capabilities=[node.capability for node in graph.nodes])
@@ -82,7 +106,23 @@ def run(
         # M5 routing + M8 recovery happen per node, inside the executor.
         failure_manager = FailureManager(registry)
         emit(EventType.ROUTING_STARTED, node_count=len(graph.nodes))
-        graph = GraphExecutor(registry, failure_manager, event_sink=event_sink, request_id=request_id).run(graph, inputs)
+        from aos_v0.core.memory_admission import DecisionLog, HeuristicController
+        from aos_v0.core.memory_retrieval import ContextBudget
+
+        graph = GraphExecutor(
+            registry,
+            failure_manager,
+            event_sink=event_sink,
+            request_id=request_id,
+            memory_bank=memory_bank,
+            controller=HeuristicController(min_substance_chars=settings.memory.min_substance_chars),
+            decision_log=DecisionLog(request_id, enabled=settings.memory.log_decisions),
+            memory_budget=ContextBudget(
+                total_chars=settings.runtime.context_chars,
+                per_entry_chars=settings.runtime.per_source_chars,
+                min_relevance=settings.memory.min_relevance,
+            ),
+        ).run(graph, inputs)
 
         final_output = IntegratorAgent().integrate(graph)
         emit(EventType.RESULT_READY, result=final_output)
@@ -91,6 +131,12 @@ def run(
 
         _print_routing_summary(graph)
         print("\n" + failure_manager.report())
+        if memory_bank:
+            memory_bank.promote_to_session()
+            print(
+                f"[memory] entries={memory_bank.stats().entries} "
+                f"recalled={memory_bank.stats().recalls}"
+            )
 
         print("\n=== FINAL OUTPUT ===")
         try:
@@ -261,6 +307,29 @@ def _collect_inputs(args: list[str]) -> dict[str, str]:
 
 def main(args: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if args is None else args)
+
+    if args and args[0] == "exam":
+        from aos_v0.exam.cli import main as exam_main
+
+        raise SystemExit(exam_main(args[1:]))
+
+    if "--help" in args or "-h" in args:
+        print("Usage: aos [--config PATH] [--budget USD] [--no-memory] PROMPT [--input PATH]")
+        print("       aos exam --help")
+        print("Configure providers in aos.yaml and put credentials in .env.")
+        return
+    if "--version" in args:
+        from aos_v0 import __version__
+
+        print(__version__)
+        return
+
+    config_arg = _pop_flag(args, "--config")
+    if config_arg:
+        os.environ["AOS_CONFIG"] = config_arg
+    if "--no-memory" in args:
+        args.remove("--no-memory")
+        os.environ["AOS_MEMORY"] = "off"
 
     budget_arg = _pop_flag(args, "--budget")
     budget = float(budget_arg) if budget_arg else DEFAULT_BUDGET_USD

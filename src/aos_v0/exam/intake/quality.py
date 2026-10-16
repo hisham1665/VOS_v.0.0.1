@@ -56,7 +56,7 @@ FAIL_SCORE = 0.40
 
 
 def luminance_stats(gray: Image.Image) -> tuple[float, float]:
-    pixels = list(gray.get_flattened_data())
+    pixels = list(gray.getdata())
     mean = sum(pixels) / len(pixels)
     variance = _variance([float(p) for p in pixels])
     return mean, variance ** 0.5
@@ -72,7 +72,7 @@ def blur_variance(image: Image.Image) -> float:
     laplacian = thumb.filter(
         ImageFilter.Kernel((3, 3), [0, 1, 0, 1, -4, 1, 0, 1, 0], scale=1, offset=128)
     )
-    pixels = [float(p) for p in laplacian.get_flattened_data()]
+    pixels = [float(p) for p in laplacian.getdata()]
     return _variance(pixels)
 
 
@@ -112,7 +112,7 @@ def page_hash(image: Image.Image) -> int:
     thumb = thumb.resize(
         (HASH_DUPLICATE_WIDTH, HASH_DUPLICATE_HEIGHT), Image.Resampling.BILINEAR
     )
-    pixels = list(thumb.get_flattened_data())
+    pixels = list(thumb.getdata())
     h = 0
     for y in range(HASH_DUPLICATE_HEIGHT):
         for x in range(HASH_DUPLICATE_WIDTH - 1):

@@ -81,3 +81,36 @@ def get_sink_nodes(graph: Graph) -> list[Node]:
     for node in graph.nodes:
         referenced.update(node.depends_on)
     return [n for n in graph.nodes if n.id not in referenced]
+
+
+def ancestors(graph: Graph, node_id: str) -> set[str]:
+    """Return all transitive prerequisites of ``node_id``."""
+    by_id = {node.id: node for node in graph.nodes}
+    found: set[str] = set()
+    pending = list(by_id[node_id].depends_on) if node_id in by_id else []
+    while pending:
+        parent = pending.pop()
+        if parent in found:
+            continue
+        found.add(parent)
+        parent_node = by_id.get(parent)
+        if parent_node:
+            pending.extend(parent_node.depends_on)
+    return found
+
+
+def descendants(graph: Graph, node_id: str) -> set[str]:
+    """Return all transitive dependants of ``node_id``."""
+    children: dict[str, list[str]] = defaultdict(list)
+    for node in graph.nodes:
+        for parent in node.depends_on:
+            children[parent].append(node.id)
+    found: set[str] = set()
+    pending = list(children.get(node_id, []))
+    while pending:
+        child = pending.pop()
+        if child in found:
+            continue
+        found.add(child)
+        pending.extend(children.get(child, []))
+    return found
