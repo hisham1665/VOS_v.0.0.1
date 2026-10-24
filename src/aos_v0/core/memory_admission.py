@@ -1,136 +1,129 @@
+"""Selective memory admission; the source AddAll ablation was faster but less accurate."""
+
+from __future__ import annotations
+
 import json
-import os
+import re
+import threading
 import time
-from typing import Protocol, List, Dict
-from aos_v0.core.shared_memory import MemoryCandidate, AdmissionDecision, SharedMemoryBank
+import warnings
+from pathlib import Path
+from typing import Protocol
+
+from aos_v0.core.shared_memory import (AdmissionDecision, MemoryCandidate,
+                                       SharedMemoryBank, compute_value_hash)
 from aos_v0.config import MEMORY_MIN_SUBSTANCE_CHARS
 
+CAPABILITY_PRIORS = {
+    "web_search": 0.95, "document_extraction": 0.95, "speech_transcription": 0.95,
+    "vision": 0.85, "code.generation": 0.80, "text.summarization": 0.45,
+    "answer.synthesis": 0.05,
+}
+ERROR_MARKERS = re.compile(
+    r"Traceback|^Error:|\[artifact '[^']+' not found\]|I cannot|I'm unable|"
+    r"document extraction failed|\(no output produced\)|\[UNAVAILABLE", re.I | re.M,
+)
+
+
 class AdmissionController(Protocol):
-    def decide(self, candidate: MemoryCandidate, bank: SharedMemoryBank, node: 'Node') -> AdmissionDecision: ...
+    def decide(self, candidate: MemoryCandidate, bank: SharedMemoryBank, node=None) -> AdmissionDecision: ...
+
 
 class HeuristicController:
-    def __init__(self):
-        self.capability_priors = {
-            "web_search": 0.95,
-            "document_extraction": 0.95,
-            "speech_transcription": 0.95,
-            "vision": 0.85,
-            "code.generation": 0.80,
-            "text.summarization": 0.45,
-            "answer.synthesis": 0.05
-        }
-        
-    def decide(self, candidate: MemoryCandidate, bank: SharedMemoryBank, node) -> AdmissionDecision:
-        # Hard rejects
-        if getattr(node, "status", None) in ("degraded", "failed"):
-            return AdmissionDecision(False, 0.0, {}, "node failed/degraded")
-        
-        value_lower = candidate.value.lower()
-        if "[artifact '" in value_lower and "' not found]" in value_lower:
-            return AdmissionDecision(False, 0.0, {}, "artifact not found error")
-            
-        error_markers = ["traceback", "^error:", "i cannot", "i'm unable", "document extraction failed"]
-        for marker in error_markers:
-            if marker in value_lower:
-                return AdmissionDecision(False, 0.0, {}, f"error marker '{marker}'")
-                
-        # Failure manager gap marker
-        if "<GAP>" in candidate.value or "FAILURE_MANAGER" in candidate.value: # Approximate for _gap_marker
-            return AdmissionDecision(False, 0.0, {}, "gap marker signature")
+    def __init__(self, base_threshold: float = 0.50, max_threshold: float = 0.85,
+                 min_substance_chars: int = MEMORY_MIN_SUBSTANCE_CHARS,
+                 weights: dict[str, float] | None = None) -> None:
+        self.base_threshold = base_threshold
+        self.max_threshold = max_threshold
+        self.min_substance_chars = min_substance_chars
+        self.weights = weights or {"capability_prior": 0.30, "novelty": 0.30,
+                                   "cost_prior": 0.20, "substance": 0.10,
+                                   "fanout_prior": 0.10}
 
-        if len(candidate.value) < MEMORY_MIN_SUBSTANCE_CHARS:
-            return AdmissionDecision(False, 0.0, {}, "trivial step length")
+    @staticmethod
+    def _tokens(value: str) -> set[str]:
+        return {token for token in re.split(r"[^a-z0-9]+", value.lower()) if len(token) >= 3}
 
-        for entry in bank.get_all_entries():
-            if entry.value_hash == candidate.value_hash:
-                return AdmissionDecision(False, 0.0, {}, "exact duplicate hash")
+    def decide(self, candidate: MemoryCandidate, bank: SharedMemoryBank, node=None) -> AdmissionDecision:
+        def reject(reason: str) -> AdmissionDecision:
+            bank.record_discard()
+            return AdmissionDecision(False, 0.0, reason, {})
 
-        # Weighted score computation
-        cap_prior = self.capability_priors.get(candidate.capability, 0.5)
-        
-        # Novelty: Approximate via fast token overlap
-        cand_tokens = set(candidate.value.lower().split())
-        max_jaccard = 0.0
-        for entry in bank.get_all_entries():
-            ent_tokens = set(entry.value.lower().split())
-            if not cand_tokens or not ent_tokens: continue
-            jaccard = len(cand_tokens & ent_tokens) / len(cand_tokens | ent_tokens)
-            if jaccard > max_jaccard:
-                max_jaccard = jaccard
-        novelty = 1.0 - max_jaccard
-        
-        # Cost prior
-        cost_prior = 0.5
-        if hasattr(node, "dna") and hasattr(node.dna, "ordinals") and hasattr(node.dna.ordinals, "demand"):
-            cost_prior = min(1.0, node.dna.ordinals.demand() / 10.0) # Assume 0-10 scale
-            
-        # Substance
-        val_len = len(candidate.value)
-        substance = min(1.0, (val_len - MEMORY_MIN_SUBSTANCE_CHARS) / 1800.0) if val_len > MEMORY_MIN_SUBSTANCE_CHARS else 0.0
-        
-        # Fanout prior (approximation: dependants count)
-        fanout_prior = min(1.0, len(getattr(node, "dependants", [])) / 5.0)
+        if candidate.status in {"degraded", "failed"} or (node is not None and getattr(node, "status", "") in {"degraded", "failed"}):
+            return reject(f"status:{candidate.status}")
+        if ERROR_MARKERS.search(candidate.value):
+            return reject("error_marker")
+        if bank.contains_value_hash(candidate.value_hash or compute_value_hash(candidate.value)):
+            return reject("duplicate_value")
+        if len(candidate.value.strip()) < self.min_substance_chars:
+            return reject("trivial")
 
-        score = (0.30 * cap_prior) + (0.30 * novelty) + (0.20 * cost_prior) + (0.10 * substance) + (0.10 * fanout_prior)
-        
+        candidate_tokens = self._tokens(candidate.value)
+        novelty = 1.0
+        for entry in bank.get_all_entries()[-32:]:
+            other = self._tokens(entry.value)
+            if candidate_tokens and other:
+                novelty = min(novelty, 1.0 - len(candidate_tokens & other) / len(candidate_tokens | other))
+        demand = candidate.dna_demand
+        if node is not None and getattr(node, "dna", None):
+            demand = node.dna.ordinals.demand()
+        fanout = candidate.fanout
+        if node is not None:
+            fanout = max(fanout, len(getattr(node, "dependants", [])))
         signals = {
-            "capability_prior": cap_prior,
-            "novelty": novelty,
-            "cost_prior": cost_prior,
-            "substance": substance,
-            "fanout_prior": fanout_prior
+            "capability_prior": CAPABILITY_PRIORS.get(candidate.capability, 0.5),
+            "novelty": max(0.0, min(1.0, novelty)),
+            "cost_prior": max(0.0, min(1.0, demand)),
+            "substance": max(0.0, min(1.0, (len(candidate.value) - self.min_substance_chars) / 1800)),
+            "fanout_prior": max(0.0, min(1.0, fanout / 4)),
         }
-
-        # Adaptive sparsity
-        stats = bank.get_stats()
-        utilization = stats.total_bytes / bank.max_total_bytes
-        threshold = 0.50 + (0.35 * utilization) # 0.50 to 0.85
-
-        if score >= threshold:
-            return AdmissionDecision(True, score, signals, "passed threshold")
-        else:
-            return AdmissionDecision(False, score, signals, "below adaptive threshold")
+        total = sum(signals[name] * weight for name, weight in self.weights.items())
+        pressure = min(1.0, bank.stats().total_bytes / max(1, bank.max_total_bytes))
+        threshold = self.base_threshold + (self.max_threshold - self.base_threshold) * pressure
+        signals["threshold"] = threshold
+        return AdmissionDecision(total >= threshold, total,
+                                 "admitted" if total >= threshold else "below_threshold", signals)
 
 
 class DecisionLog:
-    def __init__(self, log_dir: str = "log/memory_decisions"):
-        self.log_dir = log_dir
-        os.makedirs(self.log_dir, exist_ok=True)
-        
-    def log_decision(self, request_id: str, candidate: MemoryCandidate, decision: AdmissionDecision, bank: SharedMemoryBank, entry_id: str = None):
-        log_file = os.path.join(self.log_dir, f"{request_id}.jsonl")
-        
-        existing_keys = [e.key for e in bank.get_all_entries()]
-        
-        record = {
-            "ts": time.time(),
-            "request_id": request_id,
-            "node_id": candidate.node_id,
-            "capability": candidate.capability,
-            "context": {
-                "existing_keys": existing_keys,
-                "agent_output": candidate.value[:4000],
-                "summary": candidate.key
-            },
-            "decision": "ADMIT" if decision.admit else "DISCARD",
-            "score": decision.score,
-            "signals": decision.signals,
-            "entry_id": entry_id
-        }
-        
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+    def __init__(self, request_id: str = "", log_dir: str | Path = "log/memory_decisions", enabled: bool = True) -> None:
+        self.request_id = request_id
+        self.path = Path(log_dir) / f"{request_id or 'request'}.jsonl"
+        self.enabled = enabled
+        self._lock = threading.Lock()
+        self._disabled = False
 
-    def log_outcome(self, request_id: str, reward_proxy: Dict, utilised: List[str], runtime_s: float, total_injected_chars: int):
-        log_file = os.path.join(self.log_dir, f"{request_id}.jsonl")
-        record = {
-            "ts": time.time(),
-            "record": "outcome",
-            "request_id": request_id,
-            "reward_proxy": reward_proxy,
-            "utilised": utilised,
-            "runtime_s": runtime_s,
-            "total_injected_chars": total_injected_chars
-        }
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+    def _write(self, record: dict) -> None:
+        if not self.enabled or self._disabled:
+            return
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self._lock, self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            self._disabled = True
+            warnings.warn(f"AOS memory decision log disabled: {exc}", RuntimeWarning, stacklevel=2)
+
+    def record(self, candidate: MemoryCandidate, decision: AdmissionDecision,
+               existing_keys: list[str], task_query: str = "", entry_id: str | None = None) -> None:
+        self._write({"ts": time.time(), "request_id": self.request_id, "node_id": candidate.node_id,
+                     "capability": candidate.capability,
+                     "context": {"query": task_query, "existing_keys": existing_keys,
+                                 "agent_input": candidate.agent_input[:2000],
+                                 "agent_output": candidate.value[:4000], "summary": candidate.key},
+                     "decision": "ADMIT" if decision.admitted else "DISCARD", "score": decision.score,
+                     "signals": decision.signals, "entry_id": entry_id})
+
+    def log_decision(self, request_id, candidate, decision, bank, entry_id=None):
+        self.request_id = request_id
+        self.record(candidate, decision, [item.key for item in bank.keys()], entry_id=entry_id)
+
+    def record_outcome(self, reward_proxy: dict, utilised: list[str], runtime_s: float,
+                       total_injected_chars: int) -> None:
+        self._write({"ts": time.time(), "record": "outcome", "request_id": self.request_id,
+                     "reward_proxy": reward_proxy, "utilised": utilised, "runtime_s": runtime_s,
+                     "total_injected_chars": total_injected_chars})
+
+    def log_outcome(self, request_id, reward_proxy, utilised, runtime_s, total_injected_chars):
+        self.request_id = request_id
+        self.record_outcome(reward_proxy, utilised, runtime_s, total_injected_chars)

@@ -5,6 +5,7 @@ from input to final output.
 """
 
 import time
+import os
 
 from aos_v0.config import DEFAULT_BUDGET_USD
 from aos_v0.agents.graph_executor import GraphExecutor
@@ -17,10 +18,12 @@ from aos_v0.core.events import EventType, OrchestrationEvent
 from aos_v0.logbook import SessionLogger
 from aos_v0.services.resource_registration import build_hf_enabled_registry
 from aos_v0.core.runtime import RequestContext
+from aos_v0.core.models import TaskUnderstanding
 from aos_v0.prompt.display import _print_memory_summary, _print_routing_summary
 from aos_v0.prompt.compare import _check_satisfiable
 from aos_v0.core.shared_memory import SharedMemoryBank
-from aos_v0.config import AOS_MEMORY
+from aos_v0.core.memory_admission import DecisionLog, HeuristicController
+from aos_v0.settings import load_settings
 
 
 def run(
@@ -38,7 +41,17 @@ def run(
         started = time.monotonic()
 
         # Initialize Request-tier Memory Bank if AOS_MEMORY is enabled
-        request_bank = SharedMemoryBank(request_id, session_bank) if AOS_MEMORY else None
+        settings = load_settings()
+        memory_enabled = settings.memory.enabled and os.environ.get("AOS_MEMORY", "on").lower() in {"1", "true", "yes", "on"}
+        request_bank = (
+            SharedMemoryBank(
+                request_id, session_bank,
+                max_entries=settings.memory.max_entries,
+                max_value_bytes=settings.memory.max_value_bytes,
+                max_total_bytes=settings.memory.max_total_bytes,
+            )
+            if memory_enabled else None
+        )
 
         def emit(kind: EventType, **payload) -> None:
             if event_sink:
@@ -50,6 +63,13 @@ def run(
 
         manager = ManagerAgent()
         graph = manager.create_plan(user_prompt, inputs)
+        graph.task = TaskUnderstanding(
+            intent=user_prompt,
+            domain=(context.metadata.get("domain", "general") if context else "general"),
+            evidence=[{"type": key, "path": value} for key, value in (inputs or {}).items()],
+            available_capabilities={m.resource_id: list(m.capabilities) for m in registry.routable_manifests()},
+            budget_usd=budget_usd,
+        )
         if context:
             graph.artifacts.update({artifact.id: artifact for artifact in context.artifacts})
         emit(EventType.INTENT_DETECTED, planned_capabilities=[node.capability for node in graph.nodes])
@@ -67,7 +87,18 @@ def run(
         failure_manager = FailureManager(registry)
         emit(EventType.ROUTING_STARTED, node_count=len(graph.nodes))
         # Pass memory bank to GraphExecutor
-        graph = GraphExecutor(registry, failure_manager, event_sink=event_sink, request_id=request_id, memory_bank=request_bank).run(graph, inputs)
+        from aos_v0.core.memory_retrieval import ContextBudget
+        graph = GraphExecutor(
+            registry, failure_manager, event_sink=event_sink, request_id=request_id,
+            memory_bank=request_bank,
+            controller=HeuristicController(min_substance_chars=settings.memory.min_substance_chars),
+            decision_log=DecisionLog(request_id, enabled=settings.memory.log_decisions),
+            memory_budget=ContextBudget(
+                total_chars=settings.runtime.context_chars,
+                per_entry_chars=settings.runtime.per_source_chars,
+                min_relevance=settings.memory.min_relevance,
+            ),
+        ).run(graph, inputs)
 
         final_output = IntegratorAgent().integrate(graph)
         emit(EventType.RESULT_READY, result=final_output)

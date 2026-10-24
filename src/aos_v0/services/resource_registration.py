@@ -21,6 +21,47 @@ from aos_v0.core.capability_registry import (
 from aos_v0.config import _MODEL
 
 
+def _load_callable(path: str):
+    module_name, separator, function_name = path.partition(":")
+    if not separator:
+        raise ValueError(f"Configured capability callable must be module:function, got {path!r}")
+    from importlib import import_module
+    return getattr(import_module(module_name), function_name)
+
+
+def _register_configured_capabilities(registry: CapabilityRegistry) -> None:
+    """Load operator capabilities from aos.yaml without changing the kernel."""
+    from aos_v0.settings import load_settings
+
+    settings = load_settings()
+    for name, spec in settings.capabilities.items():
+        if not spec.enabled or name in settings.disabled_capabilities:
+            continue
+        if spec.handler == "python":
+            run_fn = _load_callable(spec.callable)
+        else:
+            from aos_v0.providers.gateway import ModelGateway
+            gateway = ModelGateway(settings)
+            run_fn = lambda text, instruction=None, _gateway=gateway, _role=spec.model_profile, _spec=spec: _gateway.text(
+                _role, text, _spec.system_prompt, instruction
+            )
+        registry.register(
+            CapabilityManifest(
+                resource_id=name,
+                resource_class="api" if spec.handler == "python" else "llm",
+                capabilities=spec.flags,
+                input_schema=IOSchema(type=spec.input_type, format="plain"),
+                output_schema=IOSchema(type=spec.output_type, format="json" if spec.output_schema else "plain"),
+                cost_model=CostModel(unit="per_call", estimate_usd=spec.estimated_cost_usd),
+                latency_model=LatencyModel(p50_ms=max(1, spec.latency_ms // 2), p95_ms=spec.latency_ms),
+                quality_priors={flag: spec.quality for flag in spec.flags},
+                risk_class=spec.risk,
+                metadata={"provider": "configured", "model": spec.model_profile},
+            ),
+            run_fn,
+        )
+
+
 def _print_manifest_table(manifests) -> None:
     print("\n[resource-registration] registered resources (DOC1 5.1 manifests)")
     print("=" * 72)
@@ -51,9 +92,19 @@ def build_default_registry() -> CapabilityRegistry:
     summarizer, a tight-budget one picks this, and a compare/analyse node
     requiring reasoning.deep cannot pick it at all.
     """
-    from aos_v0.capabilities import document, summarization, synthesis, vision, web_search
+    from aos_v0.capabilities import audio, document, summarization, synthesis, vision, web_search
 
     manifests = [
+        CapabilityManifest(
+            resource_id="speech_transcription", resource_class="asr",
+            capabilities=["speech.transcription"],
+            input_schema=IOSchema(type="audio", format="path"),
+            output_schema=IOSchema(type="text", format="plain"),
+            cost_model=CostModel(unit="per_call", estimate_usd=0.003),
+            latency_model=LatencyModel(p50_ms=3000, p95_ms=15000),
+            quality_priors={"speech.transcription": 0.9},
+            metadata={"provider": "configured", "model": "audio"},
+        ),
         # Retrieval tool: DDG search plus an LLM pass that pulls exact facts out
         # of the results. Cheap per call, but the network hop dominates latency.
         CapabilityManifest(
@@ -235,15 +286,19 @@ def build_default_registry() -> CapabilityRegistry:
         "document_extraction": document.run,
         "synthesis": synthesis.run,
         "quick_summarization": quick_summarization_run,
+        "speech_transcription": audio.run,
     }
 
     registry = CapabilityRegistry()
     for manifest in manifests:
         registry.register(manifest, run_fns[manifest.resource_id])
 
-    _print_manifest_table(manifests)
+    _register_configured_capabilities(registry)
+
+    all_manifests = list(registry.manifests())
+    _print_manifest_table(all_manifests)
     print(
-        f"[resource-registration] {len(manifests)} resources provide "
+        f"[resource-registration] {len(all_manifests)} resources provide "
         f"{len(registry.provided_flags())} distinct capability flags: "
         f"{registry.provided_flags()}\n"
     )

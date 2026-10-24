@@ -15,7 +15,7 @@ Input Precedence: Ensures explicit CLI arguments override dropbox-scanned files.
 
 from pathlib import Path
 import sys
-PROJECT_ROOT = Path(__file__).parent.parent.parent
+PROJECT_ROOT = Path.cwd()
 
 _AUDIO_EXTS = {".wav", ".mp3", ".ogg", ".flac", ".m4a", ".wma", ".aac"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff"}
@@ -29,8 +29,8 @@ def _detect_input_type(path: str) -> str:
     if ext in _IMAGE_EXTS:
         return "image"
     if ext in _TEXT_EXTS:
-        return "text"
-    return "text"
+        return "document"
+    return "document"
 
 def _scan_inputs_folder() -> dict[str, str]:
     """Scan the inputs/ folder for files with known extensions."""

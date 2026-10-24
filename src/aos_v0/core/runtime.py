@@ -32,6 +32,10 @@ class MemoryTelemetry:
     recalled: int = 0
     tokens_saved: int = 0
     bytes_injected: int = 0
+    evictions: int = 0
+    controller_ms: float = 0.0
+    calls_skipped: int = 0
+    chars_saved_est: int = 0
 
 @dataclass
 class Telemetry:

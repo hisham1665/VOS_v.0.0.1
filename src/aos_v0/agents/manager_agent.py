@@ -2,9 +2,8 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from groq import Groq
-
-from aos_v0.config import GROQ_API_KEY, make_groq
+from aos_v0.providers.gateway import ModelGateway
+from aos_v0.settings import load_settings
 from aos_v0.core.graph_utils import (
     validate_graph,
     build_waves,
@@ -17,6 +16,10 @@ from aos_v0.core.models import CapabilityDNA, DNAOrdinals, Graph, Node
 # The planner may only choose among these. "synthesis" is deliberately absent:
 # the kernel appends the terminal synthesis node itself.
 _CAPABILITIES = ["web_search", "summarization", "vision", "speech_transcription", "audio", "document_extraction"]
+try:
+    _CAPABILITIES.extend(name for name in load_settings().capabilities if name not in _CAPABILITIES)
+except (OSError, ValueError):
+    pass
 
 _SYNTHESIS_NODE_ID = "final"
 
@@ -199,7 +202,8 @@ class ManagerAgent:
     _MAX_COMPLETENESS_RETRIES = 1
 
     def __init__(self):
-        self._client = make_groq(GROQ_API_KEY)
+        self._gateway = ModelGateway()
+        self._client = self._gateway.client("planner")
 
     def create_plan(self, user_prompt: str, inputs: Optional[dict[str, str]] = None) -> Graph:
         print("[manager-agent] decomposing job into a task graph...")
@@ -251,7 +255,6 @@ class ManagerAgent:
         validate_graph(graph)
 
         self._write_plan_md(graph)
-        self._ensure_readme()
 
         waves = build_waves(graph)
         print(
@@ -313,7 +316,7 @@ class ManagerAgent:
     def _call_llm(self, user_prompt: str, inputs: Optional[dict[str, str]] = None) -> Graph:
         messages = self._build_messages(user_prompt, inputs)
         response = self._client.chat.completions.create(
-            model=_MODEL,
+            model=self._gateway.settings.models["planner"].model,
             messages=messages,
             tools=[_CREATE_GRAPH_TOOL],
             tool_choice={"type": "function", "function": {"name": "create_graph"}},
@@ -336,7 +339,7 @@ class ManagerAgent:
             }
         )
         response = self._client.chat.completions.create(
-            model=_MODEL,
+            model=self._gateway.settings.models["planner"].model,
             messages=messages,
             tools=[_CREATE_GRAPH_TOOL],
             tool_choice={"type": "function", "function": {"name": "create_graph"}},
@@ -387,7 +390,7 @@ class ManagerAgent:
             },
         ]
         response = self._client.chat.completions.create(
-            model=_MODEL,
+            model=self._gateway.settings.models["planner"].model,
             messages=messages,
             temperature=0.0,
             max_tokens=200,
@@ -415,7 +418,7 @@ class ManagerAgent:
             }
         )
         response = self._client.chat.completions.create(
-            model=_MODEL,
+            model=self._gateway.settings.models["planner"].model,
             messages=messages,
             tools=[_CREATE_GRAPH_TOOL],
             tool_choice={"type": "function", "function": {"name": "create_graph"}},
@@ -427,8 +430,12 @@ class ManagerAgent:
     def _build_messages(
         user_prompt: str, inputs: Optional[dict[str, str]] = None
     ) -> list:
+        configured = list(load_settings().capabilities)
+        system_prompt = _SYSTEM_PROMPT
+        if configured:
+            system_prompt += "\n\nOperator-configured capabilities available: " + ", ".join(configured)
         messages: list = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
         ]
 
         text = user_prompt
@@ -543,20 +550,5 @@ class ManagerAgent:
 
     @staticmethod
     def _ensure_readme() -> None:
-        path = Path(__file__).resolve().parents[3] / "README.md"
-        existing = path.read_text(encoding="utf-8") if path.exists() else ""
-        # Match the v0.0.2 heading too, so an upgraded repo replaces the stale
-        # section instead of appending a second one below it.
-        markers = [
-            "## How AOS v0.0.3 plans and executes tasks",
-            "## How AOS v0.0.2 plans and executes tasks",
-        ]
-        found = next((m for m in markers if m in existing), None)
-        if found:
-            start = existing.index(found)
-            content = existing[:start].rstrip("\n") + "\n\n" + _README_SECTION
-        elif existing:
-            content = existing.rstrip("\n") + "\n\n" + _README_SECTION
-        else:
-            content = _README_SECTION
-        path.write_text(content, encoding="utf-8")
+        """Deprecated compatibility hook; execution must never rewrite README.md."""
+        return None

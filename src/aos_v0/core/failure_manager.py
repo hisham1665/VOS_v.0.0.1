@@ -399,7 +399,18 @@ class FailureManager:
     @staticmethod
     def _invoke(fn: Callable, node_input, instruction):
         try:
-            return fn(node_input, instruction=instruction), None
+            raw = fn(node_input, instruction=instruction)
+            if isinstance(raw, str):
+                return raw, None
+            if isinstance(raw, dict):
+                text = raw.get("text") or raw.get("content") or raw.get("result")
+                if text is None:
+                    return "", ValueError("capability returned a mapping without text/content/result")
+                return str(text), None
+            text = getattr(raw, "text", None)
+            if text is None:
+                return "", TypeError(f"capability returned unsupported result type {type(raw).__name__}")
+            return str(text), None
         except Exception as exc:  # noqa: BLE001 -- classification is the point
             return None, exc
 

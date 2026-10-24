@@ -13,10 +13,7 @@ every enumerated item and concrete data point the upstream nodes gathered.
 
 from typing import Optional
 
-from aos_v0.config import GROQ_API_KEY, make_groq
-from aos_v0.config import _MODEL
-
-_client = make_groq(GROQ_API_KEY)
+from aos_v0.providers.gateway import ModelGateway
 
 _SYSTEM = """\
 You write the FINAL ANSWER for a user's request, using research gathered by
@@ -61,15 +58,8 @@ def run(text: str, instruction: Optional[str] = None) -> str:
             f"---\n\nRESEARCH GATHERED BY OTHER AGENTS:\n{text}"
         )
 
-    response = _client.chat.completions.create(
-        model=_MODEL,
-        messages=[
-            {"role": "system", "content": _SYSTEM},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0.2,
-        # Generous ceiling: this node is the one place where truncating the
-        # output directly costs the user the detail they asked for.
-        max_tokens=4096,
-    )
-    return response.choices[0].message.content or ""
+    gateway = ModelGateway()
+    try:
+        return gateway.text("synthesis", user_content, _SYSTEM)
+    finally:
+        gateway.close()

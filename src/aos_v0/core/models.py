@@ -176,7 +176,7 @@ class CapabilityDNA(BaseModel):
     @field_validator("flags")
     @classmethod
     def _flags_in_vocabulary(cls, flags: List[str]) -> List[str]:
-        unknown = [f for f in flags if f not in CAPABILITY_FLAGS]
+        unknown = [f for f in flags if f not in CAPABILITY_FLAGS and not _is_extension_flag(f)]
         if unknown:
             raise ValueError(
                 f"unknown capability flag(s) {unknown}; "
@@ -186,7 +186,6 @@ class CapabilityDNA(BaseModel):
         # stable list keeps plan.md and trace attributes readable.
         seen: set[str] = set()
         return [f for f in flags if not (f in seen or seen.add(f))]
-
     def effective_min_quality(self) -> float:
         """Quality bar a resource must clear, after folding in the ordinals.
 
@@ -196,6 +195,11 @@ class CapabilityDNA(BaseModel):
         real teeth in the feasibility filter.
         """
         return max(self.constraints.min_quality, self.ordinals.demand())
+
+
+def _is_extension_flag(value: str) -> bool:
+    """Allow namespaced operator plugins while keeping built-in flags documented."""
+    return isinstance(value, str) and value.count(".") >= 1 and all(part.isidentifier() for part in value.split("."))
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +230,42 @@ class Artifact(BaseModel):
     source: str = "user_input"  # "user_input" | "node:<id>"
     metadata: Dict[str, Any] = Field(default_factory=dict)
     lifecycle: str = "active"
+    content: Optional[str] = None
+    schema_id: Optional[str] = None
+    data: Dict[str, Any] = Field(default_factory=dict)
+
+
+class VerificationRequest(BaseModel):
+    """A capability may ask the kernel for one bounded, compatible verification."""
+
+    description: str
+    flags: List[str] = Field(min_length=1)
+    reason: str
+
+
+class CapabilityResult(BaseModel):
+    text: str
+    data: Dict[str, Any] = Field(default_factory=dict)
+    source_refs: List[str] = Field(default_factory=list)
+    status: Literal["done", "degraded"] = "done"
+    issues: List[str] = Field(default_factory=list)
+    verification_requests: List[VerificationRequest] = Field(default_factory=list)
+
+
+class TaskUnderstanding(BaseModel):
+    """Operator-bound task contract shared by planners and execution adapters."""
+
+    intent: str
+    domain: str = "general"
+    evidence: List[Dict[str, Any]] = Field(default_factory=list)
+    available_capabilities: Dict[str, List[str]] = Field(default_factory=dict)
+    required_flags: List[str] = Field(default_factory=list)
+    acceptance_criteria: List[str] = Field(default_factory=lambda: [
+        "Every selected input has a completed reader", "Every required task has a terminal result",
+        "Incomplete work is reported explicitly",
+    ])
+    budget_usd: float = Field(default=0.5, ge=0)
+    max_elapsed_s: float = Field(default=600, gt=0)
 
 
 class ArtifactModalityMismatch(RuntimeError):
@@ -254,7 +294,7 @@ class Node(BaseModel):
     # Coarse capability string kept from v0.0.2. It is the exact-match fallback
     # used when a node has no DNA (extractor failure, or DNA routing disabled).
     capability: str
-    depends_on: List[str] = []
+    depends_on: List[str] = Field(default_factory=list)
     input: Optional[str] = None
     output: Optional[str] = None
     status: str = "pending"  # pending | running | done | failed
@@ -271,9 +311,23 @@ class Node(BaseModel):
     # the nodes listed in depends_on. Empty means "use dependency outputs"
     # (the original v0.0.3 behaviour).
     data_inputs: List[str] = Field(default_factory=list)
+    result: Optional[CapabilityResult] = None
+    error: Optional[str] = None
+    attempts: List[Dict[str, Any]] = Field(default_factory=list)
+    usage: Dict[str, Any] = Field(default_factory=dict)
+    optional: bool = False
+    recovery_depth: int = 0
+    preferred_resource: Optional[str] = None
+    output_schema: Optional[Dict[str, Any]] = None
+    parent_data: Dict[str, Any] = Field(default_factory=dict)
 
 
 class Graph(BaseModel):
     job: str
     nodes: List[Node]
     artifacts: dict[str, Artifact] = Field(default_factory=dict)
+    task: Optional[TaskUnderstanding] = None
+    revisions: List[Dict[str, Any]] = Field(default_factory=list)
+    original_plan: Optional[Dict[str, Any]] = None
+    evaluation: Dict[str, Any] = Field(default_factory=dict)
+    metrics: Dict[str, Any] = Field(default_factory=dict)

@@ -6,7 +6,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from aos_v0.config import DEFAULT_BUDGET_USD, run
+from aos_v0.config import DEFAULT_BUDGET_USD
+from aos_v0.prompt.process import run
 from aos_v0.core.artifacts import ArtifactManager
 from aos_v0.core.events import EventBus, OrchestrationEvent
 from aos_v0.core.runtime import RequestContext, Session
@@ -15,6 +16,7 @@ from aos_v0.core.runtime import RequestContext, Session
 class InteractiveService:
     def __init__(self, storage_dir: str | Path = "data/artifacts") -> None:
         self.session = Session()
+        self.memory_enabled = True
         self.artifacts = ArtifactManager(storage_dir)
         # Most recent upload per modality. `submit()` without explicit
         # artifact_ids defaults to these, so a newly uploaded document replaces
@@ -33,6 +35,20 @@ class InteractiveService:
                 self.session.telemetry.model_used.append(event.payload["model"])
         if event.type.value == "request_completed":
             self.session.telemetry.request_latency_ms = event.payload.get("elapsed_ms", 0.0)
+        memory = self.session.telemetry.memory
+        if event.type.value == "memory_admitted":
+            memory.admitted += 1
+        elif event.type.value == "memory_discarded":
+            memory.discarded += 1
+        elif event.type.value == "memory_recalled":
+            memory.recalled += len(event.payload.get("recalled_entries", []))
+            memory.bytes_injected += event.payload.get("chars_used", 0)
+        elif event.type.value == "memory_reuse_hit":
+            memory.reused += 1
+            memory.calls_skipped += 1
+            memory.tokens_saved += event.payload.get("saved_tokens", 0)
+        elif event.type.value == "memory_evicted":
+            memory.evictions += 1
 
     def upload(self, paths: list[str]) -> list:
         started = time.monotonic()
@@ -61,14 +77,15 @@ class InteractiveService:
         from aos_v0.config import AOS_MEMORY
         from aos_v0.core.shared_memory import SharedMemoryBank
         
-        if AOS_MEMORY and getattr(self.session, 'memory_bank', None) is None:
+        if self.memory_enabled and AOS_MEMORY and getattr(self.session, 'memory_bank', None) is None:
             self.session.memory_bank = SharedMemoryBank("session_tier")
 
         inputs = {}
         for artifact in selected:
             if artifact.modality in {"image", "audio", "document"} and artifact.path:
                 inputs.setdefault(artifact.modality, artifact.path)
-        result = run(prompt, inputs or None, budget_usd, context, self.events.emit, session_bank=getattr(self.session, 'memory_bank', None))
+        result = run(prompt, inputs or None, budget_usd, context, self.events.emit,
+                     session_bank=getattr(self.session, 'memory_bank', None) if self.memory_enabled else None)
         self.session.results[context.request_id] = result
         return result
 

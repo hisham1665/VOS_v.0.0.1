@@ -1,9 +1,6 @@
 from typing import Optional
 
-from aos_v0.config import GROQ_API_KEY, make_groq
-from aos_v0.config import _MODEL
-
-_client = make_groq(GROQ_API_KEY)
+from aos_v0.providers.gateway import ModelGateway
 
 
 _DEFAULT_SYSTEM = (
@@ -36,13 +33,8 @@ def run(text: str, instruction: Optional[str] = None) -> str:
     if instruction:
         system = f"{_DEFAULT_SYSTEM}\n\nTHIS SUBTASK: {instruction}"
 
-    response = _client.chat.completions.create(
-        model=_MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": text},
-        ],
-        temperature=0.3,
-        max_tokens=2048,
-    )
-    return response.choices[0].message.content or ""
+    gateway = ModelGateway()
+    try:
+        return gateway.text("text", text, system)
+    finally:
+        gateway.close()

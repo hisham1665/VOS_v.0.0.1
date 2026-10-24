@@ -68,6 +68,20 @@ class SubAgent:
             request_id=self.request_id,
         )
 
+        if node.output and len(node.output.strip()) < 1:
+            node.error = "capability returned empty output"
+            node.status = "degraded"
+        node.usage.update({
+            "resource": node.bound_resource,
+            "routing_mode": node.routing_mode,
+            "output_chars": len(node.output or ""),
+        })
+        self.registry.performance.observe(
+            node.bound_resource or self.capability,
+            node.status == "done",
+            (time.monotonic() - self._routing_started) * 1000,
+        )
+
         # execute() sets status to "degraded" when the ladder is exhausted; only
         # promote to done when it did not.
         if node.status != "degraded":

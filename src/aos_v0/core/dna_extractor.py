@@ -23,9 +23,7 @@ heuristic produced nothing useful).
 import json
 from typing import List, Optional
 
-from groq import Groq
-
-from aos_v0.config import GROQ_API_KEY, make_groq
+from aos_v0.providers.gateway import ModelGateway
 from aos_v0.core.models import (
     CAPABILITY_FLAGS,
     ORDINAL_FIELDS,
@@ -190,12 +188,13 @@ class DNAExtractor:
         cheap_model: str = _CHEAP_MODEL,
         strong_model: str = _STRONG_MODEL,
         confidence_threshold: float = 0.7,
-        client: Optional[Groq] = None,
+        client=None,
     ) -> None:
-        self.cheap_model = cheap_model
-        self.strong_model = strong_model
+        self._gateway = ModelGateway()
+        self.cheap_model = self._gateway.settings.models["dna"].model if cheap_model == _CHEAP_MODEL else cheap_model
+        self.strong_model = self._gateway.settings.models["dna_strong"].model if strong_model == _STRONG_MODEL else strong_model
         self.confidence_threshold = confidence_threshold
-        self._client = client or make_groq(GROQ_API_KEY)
+        self._client = client
 
     # -- public API ---------------------------------------------------------
 
@@ -264,7 +263,8 @@ class DNAExtractor:
         tool call must degrade to escalation or heuristic, never kill the run.
         """
         try:
-            response = self._client.chat.completions.create(
+            client = self._client or self._gateway.client("dna" if model == self.cheap_model else "dna_strong")
+            response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": _SYSTEM_PROMPT},

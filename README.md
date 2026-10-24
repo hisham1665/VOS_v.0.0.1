@@ -1,4 +1,4 @@
-# AOS v0.1.0 — Adaptive Cognitive AI Microkernel
+# AOS v1.0.0 — Adaptive Cognitive AI Microkernel
 
 AOS (Adaptive Cognitive System) is a lightweight agentic framework that decomposes user prompts into task graphs — directed acyclic graphs (DAGs) of capability-routed nodes — and executes them concurrently in dependency-respecting waves.
 
@@ -859,6 +859,26 @@ Integrated Result
 ```
 
 AOS v0.1.0 therefore moves the system from a capability-routed task executor toward a resource-aware adaptive cognitive microkernel, while retaining the original principles of composability, determinism, concurrency, and auditability.
+
+## v1.0.0 operator quick start
+
+`v1.0.0` combines the `v0.0.6` core with the `v5.2` shared-memory work. Install
+it in editable mode, copy `.env.example` to `.env`, set the provider key, and
+edit `aos.yaml` to choose models or add capabilities:
+
+```bash
+python -m pip install -e ".[tui]"
+cp .env.example .env
+python -m aos_v0 "Research the latest treatment options and cite the sources"
+python -m aos_v0 "Analyze this report" --input data/inputs/report.pdf
+```
+
+The kernel includes web research, PDF/text extraction, image understanding,
+audio transcription, bounded shared memory, exact reuse, failure recovery,
+content-hashed artifacts, and performance-aware resource routing. See
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for extension examples and
+[`docs/ADAPTABILITY.md`](docs/ADAPTABILITY.md) for the domain-independent
+capability contract and the medical-AOS improvements applied to the core.
 
 ## How AOS v0.0.3 plans and executes tasks
 

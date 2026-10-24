@@ -1,0 +1,47 @@
+schema_version: 1
+domain: general
+
+# This file contains behavior and model selection only. Put API keys in .env.
+runtime:
+  max_workers: 4
+  call_timeout_s: 90
+  max_elapsed_s: 600
+  max_retries: 2
+  max_nodes: 64
+  budget_usd: 0.50
+  completeness_check: false
+  output_dir: data/outputs
+  log_dir: log
+
+memory:
+  enabled: true
+  reuse: true
+  max_entries: 64
+  max_value_bytes: 32000
+  max_total_bytes: 512000
+  min_relevance: 0.15
+  log_decisions: false
+
+models:
+  text:
+    provider: groq
+    model: openai/gpt-oss-20b
+    api_key_env: GROQ_API_KEY
+  planner:
+    provider: groq
+    model: openai/gpt-oss-120b
+    api_key_env: GROQ_API_KEY
+    max_tokens: 4096
+  dna_strong:
+    provider: groq
+    model: openai/gpt-oss-120b
+    api_key_env: GROQ_API_KEY
+  vision:
+    provider: ollama
+    model: medgemma1.5:latest
+    api_key_env: ""
+    base_url: http://localhost:11434/v1
+
+# Add a capability here without editing the kernel. Chat capabilities are
+# provider-neutral; Python adapters use module:function and are loaded lazily.
+capabilities: {}

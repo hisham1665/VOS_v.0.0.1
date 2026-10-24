@@ -60,5 +60,19 @@ def build_registry(service, clear: Callable[[], None], quit_app: Callable[[], No
         return "\n".join(f"✓ {a.name}\n  type: {a.artifact_type}\n  size: {a.size:,} bytes\n  artifact: {a.id}" for a in artifacts)
     registry.register("upload", "Upload one or more files", upload)
     registry.register("config", "Show runtime configuration", lambda _: "Budget is configurable through the standard CLI --budget flag")
+    def memory(args: list[str]) -> str:
+        bank = getattr(service.session, "memory_bank", None)
+        if not bank:
+            return "Memory is disabled"
+        if args and args[0] == "clear":
+            count = len(bank.get_all_entries())
+            bank.clear()
+            return f"Cleared {count} memory entries"
+        if args and args[0] in {"on", "off"}:
+            service.memory_enabled = args[0] == "on"
+            return f"Memory {'enabled' if service.memory_enabled else 'disabled'} for subsequent requests"
+        entries = bank.get_all_entries()
+        return "\n".join(f"{e.id}  {e.capability:<24} recalls={e.recall_count}  {e.key[:60]}" for e in entries) or "Memory is empty"
+    registry.register("memory", "List, clear, or toggle shared memory", memory)
     registry.register("quit", "Exit AOS", lambda _: (quit_app(), "Goodbye")[1])
     return registry

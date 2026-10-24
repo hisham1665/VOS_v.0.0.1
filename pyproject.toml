@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aos-v0"
-version = "0.0.5"
+version = "1.0.0"
 description = "A capability-routed, auditable agent execution kernel"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -16,12 +16,15 @@ dependencies = [
     "openai>=1.0.0",
     "ddgs>=9.0.0",
     "huggingface_hub[inference]>=0.35.0",
+    "pdfplumber>=0.11.0",
+    "PyYAML>=6.0",
 ]
 
 [project.scripts]
 aos = "aos_v0.cli:main"
 aos-tui = "aos_v0.tui:main"
 aos-registry-export = "aos_v0.services.registry_export:main"
+aos-memory-eval = "aos_v0.services.memory_eval:main"
 
 [project.optional-dependencies]
 tui = ["textual>=0.58,<2.0", "rich>=13,<15"]

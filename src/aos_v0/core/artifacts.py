@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
+import hashlib
 import shutil
 import uuid
 from pathlib import Path
@@ -60,10 +61,11 @@ class ArtifactManager:
             shutil.copy2(source, target)
         category = self.detect_type(source)
         mime_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
         artifact = Artifact(
             id=artifact_id, name=source.name, modality=self._modality(category),
             artifact_type=category, mime_type=mime_type, size=source.stat().st_size,
-            path=str(target), metadata=self.get_metadata(source, category),
+            path=str(target), metadata={**self.get_metadata(source, category), "sha256": digest},
         )
         self._artifacts[artifact.id] = artifact
         return artifact

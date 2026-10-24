@@ -6,6 +6,7 @@ executes the core workflow engine.
 """
 
 import sys
+import os
 from pathlib import Path
 
 from aos_v0.file_manager.collect import _collect_inputs
@@ -30,6 +31,18 @@ def _pop_flag(args: list[str], flag: str) -> str | None:
 
 def main(args: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if args is None else args)
+
+    if "--help" in args or "-h" in args:
+        print("Usage: aos [--budget USD] [--input PATH] [--image PATH] [--audio PATH] [--no-memory] PROMPT")
+        print("Configure providers and capabilities in aos.yaml; put secrets in .env.")
+        return
+
+    config_arg = _pop_flag(args, "--config")
+    if config_arg:
+        os.environ["AOS_CONFIG"] = config_arg
+    if "--no-memory" in args:
+        args.remove("--no-memory")
+        os.environ["AOS_MEMORY"] = "off"
 
     budget_arg = _pop_flag(args, "--budget")
     budget = float(budget_arg) if budget_arg else DEFAULT_BUDGET_USD

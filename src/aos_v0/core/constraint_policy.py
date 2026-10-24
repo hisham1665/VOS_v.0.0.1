@@ -100,7 +100,7 @@ class ConstraintPolicy:
         # capable resource charges -- a ceiling that excludes every candidate is
         # a bug, not a budget.
         share = self.job_budget_usd / node_count
-        cost_ceiling = max(share, self._cheapest_cost(dna.flags))
+        cost_ceiling = share
 
         # Latency: slack over the slowest capable resource, unless the caller
         # declared a job-level SLO, in which case divide it by the critical

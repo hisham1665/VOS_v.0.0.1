@@ -5,7 +5,7 @@ from typing import Optional
 
 from aos_v0.core.capability_registry import CapabilityRegistry
 from aos_v0.core.failure_manager import FailureManager
-from aos_v0.core.graph_utils import build_waves
+from aos_v0.core.graph_utils import ancestors, build_waves, descendants
 from aos_v0.core.models import Artifact, ArtifactModalityMismatch, Graph
 from aos_v0.core.events import EventType, OrchestrationEvent
 from aos_v0.agents.sub_agent import SubAgent
@@ -66,30 +66,39 @@ class GraphExecutor:
         event_sink=None,
         request_id: str = "",
         memory_bank=None,
+        controller=None,
+        retriever=None,
+        decision_log=None,
+        memory_budget=None,
+        reuse_enabled: bool = True,
     ):
         self.registry = registry
         self.failure_manager = failure_manager or FailureManager(registry)
         self.event_sink = event_sink
         self.request_id = request_id
         self.memory_bank = memory_bank
+        self.reuse_enabled = reuse_enabled
         
         if self.memory_bank:
             from aos_v0.core.memory_admission import HeuristicController, DecisionLog
-            from aos_v0.core.memory_retrieval import MemoryRetriever
-            self.admission_controller = HeuristicController()
-            self.decision_log = DecisionLog()
-            self.memory_retriever = MemoryRetriever()
+            from aos_v0.core.memory_retrieval import ContextBudget, MemoryRetriever
+            self.admission_controller = controller or HeuristicController()
+            self.decision_log = decision_log or DecisionLog(request_id)
+            self.memory_retriever = retriever or MemoryRetriever()
+            self.memory_budget = memory_budget or ContextBudget()
         else:
             self.admission_controller = None
             self.decision_log = None
             self.memory_retriever = None
+            self.memory_budget = None
+        self._artifact_lock = threading.RLock()
 
     def _emit(self, event_type: EventType, **payload) -> None:
         if self.event_sink:
             self.event_sink(OrchestrationEvent(event_type, self.request_id, payload))
 
     def run(self, graph: Graph, inputs: Optional[dict[str, str]] = None) -> Graph:
-        waves = build_waves(graph)
+        build_waves(graph)  # validates the graph; scheduling below is dependency-ready
         by_id = {n.id: n for n in graph.nodes}
         inputs = inputs or {}
 
@@ -106,19 +115,13 @@ class GraphExecutor:
                     )
         graph.artifacts = artifacts
 
-        for wave_idx, wave in enumerate(waves):
-            _safe_print(
-                f"[graph-executor] wave {wave_idx} starting "
-                f"({len(wave)} nodes, running concurrently)"
-            )
-
-            def _run_node(node):
+        def _run_node(node):
                 started = time.monotonic()
                 self._emit(EventType.AGENT_STARTED, node_id=node.id, agent=node.capability)
                 # --- determine node input ---
                 import hashlib
                 
-                # Base input from data_inputs or job
+                # Base input from data_inputs, dependency outputs, or the job.
                 if node.data_inputs:
                     parts = []
                     for aid in node.data_inputs:
@@ -132,6 +135,15 @@ class GraphExecutor:
                             f"From artifact '{aid}' ({art.modality}):\n{content}"
                         )
                     node.input = "\n\n".join(parts)
+                elif node.depends_on:
+                    parts = []
+                    for parent_id in node.depends_on:
+                        parent = by_id[parent_id]
+                        parts.append(
+                            f"From node '{parent.id}' ({parent.description}):\n"
+                            f"{parent.output or '(no output produced)'}"
+                        )
+                    node.input = "\n\n".join(parts) + "\n\n" + graph.job
                 else:
                     node_flags = set(node.dna.flags) if node.dna else set()
                     modality = _infer_modality(node_flags, node.capability)
@@ -140,27 +152,19 @@ class GraphExecutor:
                     else:
                         node.input = graph.job
 
-                # Memory Retrieval and Injection
+                # Memory retrieval is additive: parent outputs are required data,
+                # while shared memory is a bounded index and reuse layer.
                 if self.memory_bank:
-                    from aos_v0.core.memory_retrieval import ContextBudget
-                    budget = ContextBudget()
-                    recall_result = self.memory_retriever.select(node, self.memory_bank, budget)
+                    recall_result = self.memory_retriever.select(
+                        node, self.memory_bank, ancestors(graph, node.id), self.memory_budget
+                    )
                     if recall_result.injected_text:
                         node.input = recall_result.injected_text + node.input
                         self._emit(EventType.MEMORY_RECALLED, node_id=node.id, 
-                                   recalled_entries=[e.id for e in recall_result.selected_entries])
+                                   recalled_entries=recall_result.selected,
+                                   scores=recall_result.scores,
+                                   chars_used=recall_result.chars_used)
                 else:
-                    # Legacy unconditional injection (fallback if AOS_MEMORY is off)
-                    if node.depends_on:
-                        parts = []
-                        for parent_id in node.depends_on:
-                            parent = by_id[parent_id]
-                            parts.append(
-                                f"From node '{parent.id}' ({parent.description}):\n"
-                                f"{parent.output or '(no output produced)'}"
-                            )
-                        node.input = "\n\n".join(parts) + "\n\n" + node.input
-                        
                     # Legacy vision/audio/document context
                     vision_arts = [a for a in artifacts.values() if a.modality == "image" and a.source != "user_input"]
                     if node.capability != "vision" and vision_arts:
@@ -180,10 +184,10 @@ class GraphExecutor:
 
                 # Reuse short-circuit
                 skip_execution = False
-                if self.memory_bank:
+                if self.memory_bank and self.reuse_enabled:
                     reusable_caps = {"web_search", "document_extraction", "speech_transcription", "vision"}
-                    normalized_input = f"{node.capability}|{node.input}".lower().strip()
-                    input_hash = hashlib.sha256(normalized_input.encode('utf-8')).hexdigest()
+                    from aos_v0.core.shared_memory import compute_input_hash
+                    input_hash = compute_input_hash(node.capability, node.input or "")
                     
                     hit = self.memory_bank.lookup_reusable(node.capability, input_hash)
                     if hit and node.capability in reusable_caps:
@@ -193,6 +197,7 @@ class GraphExecutor:
                         node.bound_resource = hit.resource_id
                         node.routing_mode = "memory"
                         self._emit(EventType.MEMORY_REUSE_HIT, node_id=node.id, saved_tokens=hit.tokens_est)
+                        self.memory_bank.get(hit.id, recalled_by=node.id)
                         skip_execution = True
 
                 if not skip_execution:
@@ -211,24 +216,24 @@ class GraphExecutor:
                 if self.memory_bank and node.output and not skip_execution:
                     from aos_v0.core.shared_memory import MemoryCandidate
                     from aos_v0.core.memory_summary import build_summary_key
-                    import hashlib
-                    
-                    normalized_val = node.output.lower().strip()
-                    val_hash = hashlib.sha256(normalized_val.encode('utf-8')).hexdigest()
-                    normalized_input = f"{node.capability}|{node.input}".lower().strip()
-                    in_hash = hashlib.sha256(normalized_input.encode('utf-8')).hexdigest()
+                    from aos_v0.core.shared_memory import compute_input_hash, compute_value_hash
+                    val_hash = compute_value_hash(node.output)
+                    in_hash = compute_input_hash(node.capability, node.input or "")
 
-                    summary_key = build_summary_key(node.description, node.capability, node.output)
+                    summary_key = build_summary_key(node.id, node.capability, node.description, node.output)
                     
                     candidate = MemoryCandidate(
                         node_id=node.id,
                         capability=node.capability,
+                        description=node.description,
                         resource_id=node.bound_resource,
-                        input_hash=in_hash,
-                        value_hash=val_hash,
-                        tokens_est=len(node.output) // 4,
-                        key=summary_key,
-                        value=node.output
+                        status=node.status,
+                        value=node.output,
+                        agent_input=node.input or "",
+                        dna_demand=node.dna.ordinals.demand() if node.dna else 0.0,
+                        fanout=len(descendants(graph, node.id)),
+                        input_hash=in_hash, value_hash=val_hash,
+                        tokens_est=max(1, len(node.output) // 4), key=summary_key,
                     )
                     decision = self.admission_controller.decide(candidate, self.memory_bank, node)
                     
@@ -237,10 +242,12 @@ class GraphExecutor:
                         entry = self.memory_bank.admit(candidate, decision)
                         entry_id = entry.id
                         self._emit(EventType.MEMORY_ADMITTED, node_id=node.id, entry_id=entry.id)
+                        for evicted in self.memory_bank.consume_evicted():
+                            self._emit(EventType.MEMORY_EVICTED, node_id=node.id, entry_id=evicted.id)
                     else:
                         self._emit(EventType.MEMORY_DISCARDED, node_id=node.id, reason=decision.reason)
                         
-                    self.decision_log.log_decision(self.request_id, candidate, decision, self.memory_bank, entry_id)
+                    self.decision_log.record(candidate, decision, [item.key for item in self.memory_bank.keys()], entry_id=entry_id)
 
                 # Register node output as a new artifact for downstream nodes.
                 if node.output and node.status != "degraded":
@@ -248,11 +255,12 @@ class GraphExecutor:
                     modality = _infer_modality(node_flags, node.capability)
                     out_modality = modality or "text"
                     out_aid = f"output_{node.id}"
-                    artifacts[out_aid] = Artifact(
-                        id=out_aid,
-                        modality=out_modality,
-                        source=f"node:{node.id}",
-                    )
+                    with self._artifact_lock:
+                        artifacts[out_aid] = Artifact(
+                            id=out_aid,
+                            modality=out_modality,
+                            source=f"node:{node.id}",
+                        )
 
                 _safe_print(
                     f"[graph-executor] node '{node.id}' {node.status} "
@@ -261,15 +269,43 @@ class GraphExecutor:
                 elapsed_ms = round((time.monotonic() - started) * 1000, 2)
                 event_type = EventType.AGENT_COMPLETED if node.status == "done" else EventType.AGENT_FAILED
                 self._emit(event_type, node_id=node.id, agent=node.capability,
-                           resource=node.bound_resource, status=node.status, elapsed_ms=elapsed_ms)
+                           resource=node.bound_resource, status=node.status, elapsed_ms=elapsed_ms,
+                           input_chars=len(node.input or ""), output_chars=len(node.output or ""))
                 return node
 
-            with ThreadPoolExecutor(max_workers=len(wave)) as pool:
-                futures = {pool.submit(_run_node, node): node for node in wave}
-                for future in as_completed(futures):
-                    future.result()
-
-            _safe_print(f"[graph-executor] wave {wave_idx} complete")
+        dependants: dict[str, list] = {node.id: [] for node in graph.nodes}
+        remaining: dict[str, int] = {node.id: len(node.depends_on) for node in graph.nodes}
+        for node in graph.nodes:
+            for parent in node.depends_on:
+                dependants[parent].append(node)
+        ready = [node for node in graph.nodes if remaining[node.id] == 0]
+        completed: set[str] = set()
+        wave_idx = 0
+        from aos_v0.config import AOS_MAX_WORKERS
+        with ThreadPoolExecutor(max_workers=AOS_MAX_WORKERS) as pool:
+            futures = {}
+            while ready or futures:
+                if ready:
+                    _safe_print(f"[graph-executor] dispatching {len(ready)} dependency-ready node(s) (batch {wave_idx})")
+                for node in ready:
+                    futures[pool.submit(_run_node, node)] = node
+                ready = []
+                for future in as_completed(list(futures)):
+                    node = futures.pop(future)
+                    try:
+                        future.result()
+                    except Exception as exc:  # one branch must not erase completed work
+                        node.status = "failed"
+                        node.error = f"{type(exc).__name__}: {exc}"
+                        node.output = f"[UNAVAILABLE — node '{node.id}' failed: {node.error}]"
+                        self._emit(EventType.AGENT_FAILED, node_id=node.id, agent=node.capability,
+                                   status=node.status, error=node.error)
+                    completed.add(node.id)
+                    for child in dependants[node.id]:
+                        remaining[child.id] -= 1
+                        if remaining[child.id] == 0:
+                            ready.append(child)
+                wave_idx += 1
 
         return graph
 

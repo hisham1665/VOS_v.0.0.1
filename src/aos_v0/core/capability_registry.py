@@ -32,6 +32,7 @@ from typing import Callable, Dict, List, Literal, Optional, Tuple
 from pydantic import BaseModel, Field, field_validator
 
 from aos_v0.core.models import CAPABILITY_FLAGS, CapabilityDNA, risk_rank
+from aos_v0.core.performance import PerformanceStore
 
 
 ResourceClass = Literal[
@@ -117,6 +118,7 @@ _IMAGE_MODALITY_FLAGS = {
 }
 
 _AUDIO_MODALITY_FLAGS = {
+    "speech.transcription",
     "audio_input",
     "speech_recognition",
     "automatic_speech_recognition",
@@ -211,11 +213,15 @@ class CapabilityManifest(BaseModel):
     # on `capabilities` only, so the core stays provider-agnostic and this is
     # trace/plan data, never decision logic.
     metadata: Dict[str, str] = Field(default_factory=dict)
+    description: str = ""
+    output_json_schema: Optional[dict] = None
+    requires_all_inputs: bool = False
+    min_output_chars: int = Field(default=1, ge=1)
 
     @field_validator("capabilities")
     @classmethod
     def _capabilities_in_vocabulary(cls, caps: List[str]) -> List[str]:
-        unknown = [c for c in caps if c not in CAPABILITY_FLAGS]
+        unknown = [c for c in caps if c not in CAPABILITY_FLAGS and not (isinstance(c, str) and c.count(".") >= 1)]
         if unknown:
             raise ValueError(
                 f"unknown capability flag(s) {unknown}; "
@@ -226,7 +232,7 @@ class CapabilityManifest(BaseModel):
     @field_validator("quality_priors")
     @classmethod
     def _priors_in_vocabulary(cls, priors: Dict[str, float]) -> Dict[str, float]:
-        unknown = [k for k in priors if k not in CAPABILITY_FLAGS]
+        unknown = [k for k in priors if k not in CAPABILITY_FLAGS and not (isinstance(k, str) and k.count(".") >= 1)]
         if unknown:
             raise ValueError(f"quality_priors keyed by unknown flag(s) {unknown}")
         bad = {k: v for k, v in priors.items() if not 0.0 <= v <= 1.0}
@@ -327,6 +333,7 @@ class SelectionResult:
     cost_usd: float
     latency_ms: int
     all_scores: List[DNAScore]
+    rejections: Dict[str, str] = field(default_factory=dict)
 
     # Runner-up fields kept for backward compat with sub_agent.py log lines.
     @property
@@ -398,6 +405,7 @@ class CapabilityRegistry:
         # Legacy Pareto params kept so callers that pass them don't break.
         lambda_cost: float = 0.3,
         mu_latency: float = 0.2,
+        performance: Optional[PerformanceStore] = None,
     ) -> None:
         self._manifests: Dict[str, CapabilityManifest] = {}
         self._run_fns: Dict[str, Callable] = {}
@@ -407,6 +415,7 @@ class CapabilityRegistry:
         # Legacy attributes retained for any code that reads them directly.
         self.lambda_cost = lambda_cost
         self.mu_latency = mu_latency
+        self.performance = performance or PerformanceStore()
 
     # -- registration -------------------------------------------------------
 
@@ -466,7 +475,7 @@ class CapabilityRegistry:
         exactly, so we never feed an image file path to a text-only LLM.
         """
         if modality is None:
-            return True
+            return manifest.input_schema.type in {"text", "structured"}
         return manifest.input_schema.type == modality
 
     def routable_for_modality(
@@ -514,7 +523,34 @@ class CapabilityRegistry:
         capability*, rather than a soft scoring miss that a partial-match
         resource might partially cover.
         """
-        return missing_flags(dna, self.provided_flags())
+        provided = [flag for manifest in self.routable_manifests()
+                    if manifest.availability.status == "up" for flag in manifest.capabilities]
+        return missing_flags(dna, provided)
+
+    def rejection_reason(self, manifest: CapabilityManifest, dna: CapabilityDNA,
+                         required_modality: Optional[str] = None) -> Optional[str]:
+        import time
+        if not self.is_routable(manifest):
+            return "declared-only interface"
+        if manifest.availability.status != "up":
+            return f"unavailable: {manifest.availability.status}"
+        if not self.accepts_input(manifest, required_modality):
+            return f"input type {manifest.input_schema.type} incompatible with {required_modality or 'text'}"
+        missing = missing_flags(dna, manifest.capabilities)
+        if missing:
+            return f"missing required skills: {missing}"
+        constraints = dna.constraints
+        if risk_rank(manifest.risk_class) > risk_rank(constraints.risk_tolerance):
+            return "risk tolerance exceeded"
+        if manifest.cost_model.estimate_usd > constraints.cost_ceiling_usd:
+            return "cost ceiling exceeded"
+        if manifest.latency_model.p95_ms > constraints.latency_slo_ms:
+            return "latency SLO exceeded"
+        if manifest.quality_for(dna.flags) < dna.effective_min_quality():
+            return "quality floor not met"
+        if manifest.metadata.get("provider") and self.performance.get(manifest.resource_id).get("cooldown_until", 0) > time.time():
+            return "recent failed invocation cooldown"
+        return None
 
     # -- continuous DNA scorer ----------------------------------------------
 
@@ -712,20 +748,13 @@ class CapabilityRegistry:
         # on invocation. Both are un-routable for different reasons.
         available: List[CapabilityManifest] = []
         unavailable: Dict[str, str] = {}
+        required_modality = required_modality or required_input_modality(dna.flags)
         for rid, manifest in self._manifests.items():
-            if not self.is_routable(manifest):
-                unavailable[rid] = "declared-only interface (not wired to pipeline)"
-            elif not self.accepts_input(manifest, required_modality):
-                unavailable[rid] = (
-                    f"input schema '{manifest.input_schema.type}' does not accept "
-                    f"required modality '{required_modality}'"
-                )
-            elif manifest.availability.status == "up":
-                available.append(manifest)
+            reason = self.rejection_reason(manifest, dna, required_modality)
+            if reason:
+                unavailable[rid] = reason
             else:
-                unavailable[rid] = (
-                    f"unavailable (status={manifest.availability.status})"
-                )
+                available.append(manifest)
 
         if not available:
             raise InfeasibleDNAError(dna, unavailable)
@@ -734,6 +763,13 @@ class CapabilityRegistry:
         scores: List[DNAScore] = [
             self.score_against_dna(manifest, dna) for manifest in available
         ]
+        for score in scores:
+            history = self.performance.get(score.resource_id)
+            calls = history.get("calls", 0)
+            if calls:
+                reliability = (history.get("successes", 0) + 1) / (calls + 2)
+                score.score += 0.2 * reliability - 0.1 * min(
+                    history.get("latency_ms", 0) / max(1, dna.constraints.latency_slo_ms), 1)
 
         # Sort descending by score, tie-break on resource_id for determinism.
         scores.sort(key=lambda s: (-s.score, s.resource_id))
@@ -746,6 +782,7 @@ class CapabilityRegistry:
             cost_usd=winner.cost_usd,
             latency_ms=winner.latency_ms,
             all_scores=scores,
+            rejections=unavailable,
         )
 
     def bind(
@@ -771,14 +808,11 @@ class CapabilityRegistry:
         survivors: List[CapabilityManifest] = []
         rejections: Dict[str, str] = {}
         for rid, manifest in self._manifests.items():
-            if not self.is_routable(manifest):
-                rejections[rid] = "declared-only interface (not wired to pipeline)"
-            elif manifest.availability.status == "up":
-                survivors.append(manifest)
+            reason = self.rejection_reason(manifest, dna, required_input_modality(dna.flags))
+            if reason:
+                rejections[rid] = reason
             else:
-                rejections[rid] = (
-                    f"unavailable (status={manifest.availability.status})"
-                )
+                survivors.append(manifest)
         return survivors, rejections
 
     def score_candidate(

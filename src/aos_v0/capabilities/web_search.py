@@ -1,10 +1,7 @@
 from typing import Optional
 
 from ddgs import DDGS
-from aos_v0.config import GROQ_API_KEY, make_groq
-from aos_v0.config import _MODEL
-
-_client = make_groq(GROQ_API_KEY)
+from aos_v0.providers.gateway import ModelGateway
 
 # Sentinel the Failure Manager's content detector looks for. Emitting a token
 # instead of prose means an empty result is a *classifiable* failure rather
@@ -41,8 +38,9 @@ def run(query: str, instruction: Optional[str] = None) -> str:
     if not results_text:
         return f"{NO_DATA_PREFIX} web search returned no results for {search_query!r}"
 
-    response = _client.chat.completions.create(
-        model=_MODEL,
+    gateway = ModelGateway()
+    response = gateway.complete(
+        "text",
         messages=[
             {"role": "system", "content": _SYSTEM},
             {
@@ -56,6 +54,7 @@ def run(query: str, instruction: Optional[str] = None) -> str:
         temperature=0.3,
         max_tokens=2048,
     )
+    gateway.close()
     return response.choices[0].message.content or f"{NO_DATA_PREFIX} empty model reply"
 
 
