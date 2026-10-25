@@ -1,0 +1,52 @@
+1.left_tibial_fracture 1:
+history :- severe leg pain and cant move
+plan :- left_tibial_fracture_plan.md
+report :- left_tibial_fracture.md
+
+2.cholecystitis 1:
+history :- severe pain the abdomen..
+plan :- cholecystitis_plan.md
+report :- cholecystitis.md
+
+3.Myocardial Infarction 1 :
+history :- mild chest pain, heat sensations in the chest  region.
+plan :- Myocardial Infarction_plan.md
+report :- Myocardial Infarction.md
+
+4.Appendicitis 1:
+history :- Loss of appetite,Nausea and vomiting
+plan :- Appendicitis_plan.md
+report :- Appendicitis.md
+
+5.skull fracture 1:
+history:- damage head during an accident
+plan :- skull fracture_plan.md
+report :- skull fracture.md
+
+6.nose fracture 1:
+history:- damaged the nose while praticing the football in the school...
+plan :- nose fracture_plan.md
+report :- nose fracture.md
+
+7.Varicella-Zoster Virus 1:
+history:- high body temperature
+plan :- Varicella-Zoster Virus_plan.md
+report :- Varicella-Zoster Virus.md
+
+8.cataract 1:
+history:- reddish eye  with fluid secreations
+plan :- cataract_plan.md
+report :- cataract.md
+
+9.ligament fracture 1:
+history:- severe knee pain and cant even walk due to an accident
+plan :- ligament_plan.md
+report :- ligament.md
+
+10.Pancreatitis 1:
+history:-severe upper abdominal pain that often radiates to the back, alongside nausea, vomiting, and tender swelling in the belly
+plan :- Pancreatitis_plan.md
+report :- Pancreatitis.md
+
+
+

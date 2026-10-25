@@ -190,7 +190,8 @@ said `Hemoglobin 11.8 g/dL`. BM25 saw `haemoglobin` and `hemoglobin` as
 different words, the dense model was still downloading, and the assistant
 answered "no haemoglobin value is available". That wrong answer was then
 indexed as a conversation turn — memory poisoning. Three changes followed,
-each with a regression test (`tests/test_chat.py::TestRetrievalRegressions`):
+with the current evidence-balancing regression covered by
+`tests/test_aos_continuity.py::test_prompt_balances_earlier_labs_and_later_imaging_sources`:
 spelling/abbreviation normalisation, fill-to-budget evidence, and separating
 past answers from evidence. The same question now returns
 `11.8 g/dL (low) [lab_report.pdf#page=1]`.
@@ -211,8 +212,8 @@ tui/app.py ──(worker thread)──▶ chat/engine.py ──▶ pipeline.anal
 
 * The **engine is UI-agnostic** — the TUI, a test, or a future web UI drive
   the same `ChatEngine.handle(text)`. The analyzer and LLM are injectable;
-  `tests/test_chat.py` runs the whole flow (including the Textual app via its
-  headless pilot) with stubs and no network.
+  `tests/test_aos_continuity.py::test_named_tui_replays_existing_transcript_without_explicit_resume`
+  exercises named-session replay with stubs and no network.
 * The TUI runs the engine on a **worker thread** so the interface stays live
   (spinner + latest pipeline stage in the status line), turns console logging
   off (`set_console_logging(False)`) and captures library prints into

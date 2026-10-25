@@ -164,9 +164,12 @@ temporary copy**: the exact registry roster includes four new capabilities, and
 the happy-path report stub supplies the now-required structured assessment.
 Repository test deletions and archived disease outputs are preserved.
 
-Latest full run: **266 passed in 8.91s** (31 continuity cases + 31 adaptive/image
-cases + 204 legacy cases with the two temporary fixture updates). Compilation
-and CRLF-aware `git diff --check` passed.
+Historical full compatibility run: **266 passed in 8.91s** (31 continuity cases
++ 31 adaptive/image cases + 204 legacy cases with the two temporary fixture
+updates). Compilation and CRLF-aware `git diff --check` passed for that
+snapshot. The current checked-in workspace result is **82 passed in 2.22s**;
+see [PROJECT_REPORT_READINESS.md](PROJECT_REPORT_READINESS.md#verification-snapshot)
+and [../tests/TEST_RESULTS.md](../tests/TEST_RESULTS.md).
 
 ```bash
 PYTHONPATH="$PWD" MAOS_CHAT_EMBEDDINGS=off \

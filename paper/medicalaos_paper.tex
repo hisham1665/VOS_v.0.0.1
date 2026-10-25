@@ -1,0 +1,146 @@
+\documentclass[a4paper,conference]{IEEEtran}
+
+\IEEEoverridecommandlockouts
+\usepackage{cite}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{url}
+\usepackage{xcolor}
+\usepackage{balance}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{cuted}
+
+\hypersetup{hidelinks}
+\emergencystretch=1.5em
+
+\title{MedicalAOS: A Capability-Aware, Provenance-Preserving Agentic Pipeline for Heterogeneous Medical Study Analysis}
+
+\author{\IEEEauthorblockN{\mbox{[Author Name(s)]}}
+\IEEEauthorblockA{\mbox{[Department or Laboratory]}\\
+\mbox{[Institution]}\\
+\mbox{[City, Country]}\\
+\texttt{[corresponding.author@institution.edu]}}}
+
+\begin{document}
+\maketitle
+
+\begin{strip}
+\begin{abstract}
+Medical study analysis rarely consists of a single image and a single model call. A study may combine DICOM series, raster images, laboratory documents, prior reports, pathology, clinical history, and incomplete or unreadable files. We present MedicalAOS, a capability-aware agentic pipeline that represents this work as a typed, bounded task graph rather than an unconstrained prompt. The system separates ingestion, modality-aware screening, specialist confirmation, image and document reading, cross-source reconciliation, runtime verification, and report integration. Its capability registry records model contracts, resources, alternatives, and execution telemetry; its artifact channel preserves source-linked evidence separately from generated prose; and its report integrator exposes partial coverage, failures, disagreement, and indeterminate states. We evaluate operational behavior using 82 offline regression tests and 20 historical plan/report pairs from two saved collections. All 82 regression tests passed. The historical artifacts show useful source-linked synthesis and visible image--document disagreement, but also show provider failures, schema failures, unknown modality metadata, two mispaired cases, and the absence of direct images in the first collection. Thus, the evidence supports an architecture and failure-containment contribution, not diagnostic-accuracy claims. MedicalAOS is intended as clinician-reviewed decision support and not as an autonomous diagnostic system.
+\end{abstract}
+\begin{IEEEkeywords}
+medical imaging, clinical decision support, agentic systems, provenance, task graphs, multimodal reasoning, failure containment
+\end{IEEEkeywords}
+\end{strip}
+
+\section{Introduction}
+Medical AI research has produced highly capable models for selected modalities and labels, but a deployed study is not equivalent to a benchmark input. Clinical material can contain multiple views, multi-frame DICOM objects, written imaging reports, laboratory values, pathology, patient context, and files that fail to decode. A system that routes every image to a universal classifier or gives all evidence to one language model can lose source identity, apply an out-of-scope model, hide missing coverage, or produce a fluent but weakly supported conclusion. These concerns are consistent with clinical implementation guidance that emphasizes validation, workflow integration, monitoring, and safety rather than model accuracy alone \cite{recht2020integrating,filice2020products}.
+
+MedicalAOS addresses this systems problem through four design commitments. First, study inputs are normalized into provenance-bearing image, series, document, and patient-context objects. Second, analysis is represented as a deterministic radiology graph whose nodes execute registered capabilities under dependency, resource, timeout, retry, and budget constraints. Third, typed artifacts carry findings, source references, screening state, quality warnings, and verification results between nodes rather than requiring each downstream model to re-parse prose. Fourth, the final report preserves degradation and uncertainty: a failed read is not a normal read, an unsupported screener is not a negative prediction, and a negative test is not automatically a rule-out.
+
+The contribution of this work is an implementable architecture and an operational evaluation of these safeguards. We do not claim a new disease classifier or clinical superiority. Instead, we document how a capability-aware orchestration layer can make heterogeneous medical-study analysis more auditable and more honest about incomplete evidence. The paper makes three specific contributions:
+\begin{itemize}
+  \item a typed, dependency-aware architecture for combining image, document, and clinical-context capabilities;
+  \item a modality-routed cascade with bounded runtime verification, source binding, and structured degradation; and
+  \item a reproducible operational evaluation using the project's regression suite and saved execution artifacts, with explicit fixture and coverage limitations.
+\end{itemize}
+
+\section{Related Work and Gap}
+Deep learning systems such as CheXNet demonstrated the value of specialized image classifiers for narrowly defined tasks \cite{rajpurkar2017chexnet}. Large de-identified resources such as MIMIC-CXR make image--report research possible at scale, while also illustrating that a study may contain multiple images and free-text reports rather than a single isolated pixel array \cite{johnson2019mimic}. These systems are complementary to MedicalAOS: the project can route supported specialist models, but it does not treat any one model as a universal reader.
+
+Recent agentic approaches use a language model as a planner and controller over external tools or specialist models. ReAct interleaves reasoning and acting, while HuggingGPT uses task planning to select models from a model ecosystem \cite{yao2023react,shen2023hugginggpt}. MedicalAOS adopts the useful idea of capability composition but imposes a stricter clinical control boundary: the fixed radiology graph is constructed in code, model selection is constrained by declared skills and modality coverage, and runtime replanning is bounded and recorded. This distinction matters because open-ended planning can be useful for exploratory tasks but should not silently change the evidence contract of a clinical report.
+
+Reporting guidance also motivates this work. CLAIM emphasizes transparent reporting of data, methods, evaluation, and limitations in medical-imaging AI studies \cite{mongan2020claim}; MI-CLAIM similarly emphasizes the information needed to assess clinical machine-learning models \cite{norgeot2020miclaim}. Our focus is the operational layer that connects those concerns to an executing system: input manifest, node trace, model route, source references, acceptance criteria, and visible failure state.
+
+\section{System Design}
+\subsection{Study representation and ingestion}
+The input boundary accepts raster images, DICOM and multi-frame DICOM, PDF, plain text, Markdown, CSV/TSV, JSON, XML, HTML, YAML, RTF, DOCX, XLSX, and an optional patient-context sidecar. Each study is converted into a typed object with stable local identifiers, content hashes, metadata, warnings, skipped files, and series context. DICOM decoding preserves frame indices and applies modality-specific value transformations and windowing; derived metadata can hash scanner identifiers when de-identification is enabled. Documents preserve physical page boundaries and can retain rendered page images when native text is absent. These choices follow the DICOM information model while keeping raw-file identity separate from prepared model pixels \cite{dicom2025}.
+
+Image preparation records both the source hash and the prepared-pixel hash. This prevents an image-inference cache from reusing a result after a windowing, resizing, or pixel-content change. Series grouping records ordering and whether supplied files establish complete or only partial coverage. Technical quality checks identify blank, uniform, low-resolution, or low-contrast input but do not certify diagnostic adequacy.
+
+\subsection{Capability-aware task graph}
+The deterministic radiology planner constructs a graph with quality assessment, modality triage, stage-1 screening, specialist confirmation, per-image reads, page-level document analysis, cross-source consolidation, optional literature lookup, report synthesis, and typed integration. Nodes have explicit dependencies, assigned source IDs, partial-dependency policy, status, artifacts, model metadata, timing, error state, and retry trace.
+
+The executor validates node IDs, dependencies, cycles, and a graph-size ceiling before model calls. It maintains one bounded worker pool and submits any node whose own dependencies are terminal. Parent text is capped; parent artifacts are merged structurally; and task budgets reserve declared cost, memory, elapsed time, attempts, replans, and added nodes before execution. A local GPU or vision-server semaphore limits concurrent image calls. Timeouts are cooperative: the node becomes terminal, but a low-level provider call may continue until its client-level timeout.
+
+\subsection{Modality-aware cascade and evidence lanes}
+The cascade first performs technical quality and non-medical gating, then combines DICOM metadata, conservative filename hints, and a learned modality/region triage route. Stage-1 screening queries only model-zoo entries that cover the identified modality and region. Stage-2 checks map candidates to independent specialists. If no trusted screener exists, the report says \textit{not screened}; it does not convert the absence of a model into a normal result. Narrative vision reading remains available for unsupported regions but is separately labelled as generative evidence.
+
+MedicalAOS keeps two evidence lanes: direct image evidence and written-report/document evidence. A written CT report may support a finding, but it is not counted as an independent CT image read. During consolidation, source references are bound in code to supplied image IDs or document pages; model-invented references are discarded. Numeric claims extracted from a document are checked against native page text, and unsupported numbers are withheld or trigger verification.
+
+\subsection{Bounded adaptation and report safety}
+Capabilities may request a verification or replacement node. The runtime replanner validates the request against the live registry and remaining budgets, constructs a detached candidate graph, validates it, rewires only pending consumers, and records the revision. Completed work is immutable, verification depth is bounded, and duplicate requests are suppressed. The mechanism is recovery policy rather than unconstrained autonomous graph generation.
+
+The integrator derives overall severity from structured findings and applies a triage floor, preventing a later prose paragraph from downgrading a critical or high finding. Empty evidence is rendered as \textit{indeterminate}, not normal. If images are supplied but unread, a document-only normal result cannot establish a normal imaging study. Markdown and JSON reports include a clinician-review disclaimer, evidence coverage, node diagnostics, model routes, warnings, and degradation state.
+
+\begin{figure}[t]
+\centering
+\fbox{\begin{minipage}[c][1.15in][c]{0.96\columnwidth}
+\centering
+\footnotesize
+\textbf{Figure placeholder: MedicalAOS architecture}\par
+Insert the generated vector diagram described in \texttt{figure\_prompt.md}.\par
+The figure should show heterogeneous inputs, the bounded capability-aware DAG,
+source-linked artifact flow, runtime verification, and Markdown/JSON outputs.
+\end{minipage}}
+\caption{MedicalAOS separates heterogeneous-study ingestion, capability-aware execution, and typed evidence integration. The executor schedules dependency-ready work under bounded resource and recovery policies; provenance and degradation metadata remain attached to the final report.}
+\label{fig:architecture}
+\end{figure}
+
+\section{Implementation}
+The implementation is a Python application organized around Pydantic domain models, a capability registry, and a reusable pipeline. The principal stages are: (1) \texttt{load\_study}; (2) deterministic plan construction; (3) bounded graph execution; (4) typed integration into \texttt{RadiologyReport}; and (5) Markdown/JSON rendering. Free-form tasks can use an LLM planner, but the generated graph is still checked against the live registry and DAG constraints. An interactive Textual interface persists uploads, reports, transcript events, indexed evidence, and a structured longitudinal differential.
+
+The capability boundary supports local and hosted text/vision routes, including Ollama or OpenAI-compatible local servers. The model catalog stores modality, region, task role, label mapping, threshold, backend, and enabled state. Content-addressed caches cover prepared pixels, triage, classifiers, vision reads, document analysis, and final reasoning; the full prompt and prepared-pixel identity participate in relevant cache keys. Network literature lookup uses finding labels rather than patient identifiers.
+
+The implementation deliberately distinguishes engineering reliability from clinical validity. A provider cooldown measures endpoint behavior, not clinical competence. A specialist model is independent only at the execution-contract level; shared training data or correlated errors are not ruled out. Likewise, exact source binding proves that a claim points to a supplied source, not that the claim is semantically or clinically correct.
+
+\section{Evaluation}
+\subsection{Questions and protocol}
+We evaluated two operational questions: (Q1) does the current implementation preserve safety-relevant behavior under controlled failures and boundary cases? (Q2) what do historical saved runs reveal about heterogeneous execution, failure containment, and evaluation validity? The evaluation intentionally does not estimate sensitivity, specificity, calibration, or clinical utility.
+
+For Q1, we ran the repository's three focused regression modules with \texttt{PYTHONPATH=.}: adaptive imaging, continuity, and image routes. The suite contains synthetic studies, injected providers, temporary sessions, and controlled failure paths. For Q2, we inspected 20 saved plan/report pairs: 10 in \texttt{tests/test2full/testfiles/} and 10 in \texttt{tests/tetingmed1/}. We matched artifacts using study IDs, histories, source inventories, and report content rather than filenames alone.
+
+\subsection{Results}
+Table~\ref{tab:operational} reports the measured regression result and the principal saved-run observations. The focused suite collected 82 tests and completed with 82 passes in 4.02~s in the latest full local-container invocation. Runtime is environment-dependent and is not treated as a performance benchmark. This is a software-regression result, not a clinical performance result.
+
+\begin{table}[t]
+\caption{Operational evaluation results.}
+\label{tab:operational}
+\centering
+\scriptsize
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.29\columnwidth}>{\raggedright\arraybackslash}p{0.61\columnwidth}@{}}
+\toprule
+\textbf{Measure} & \textbf{Observed result}\\
+\midrule
+Focused offline tests & 82 collected; 82 passed; 4.02~s latest full-suite runtime\\
+Saved collection A & 10 pairs; all reports listed 0 images; 9 degraded markers; 2 invalid/mispaired cases\\
+Saved collection B & 10 pairs; 0--2 images per report; most image modality labels were Unknown/not screened; 8 degraded markers\\
+Evidence behavior & Source-linked document synthesis and direct-image/written-report disagreement were preserved in representative cases\\
+Failure behavior & Provider unsupported errors, TLS/rate limits, invalid JSON, synthesis fallback, and incomplete coverage were visible in reports\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The first saved collection is document-only in the stored reports. The kidney-failure case provides a strong document-integration example: renal function, proteinuria, ultrasound, nuclear medicine, anemia, electrolytes, and CKD-mineral findings remain linked to pages, although no direct image was available. The collection also contains a rib-fracture plan/report pair that is actually the hernia study and a bronchitis result that is a glioblastoma report; both must be excluded from disease-level aggregation.
+
+The second collection contains teaching images but weak modality metadata. The nose-fracture case records a meaningful discordance: the written report describes a displaced fracture while the direct image read describes intact nasal bones and septal/ala fractures. The report preserves both evidence types, marks disagreement, and recommends confirmatory CT/ENT review. Other cases show unsupported hosted vision routes, provider TLS failures, rate limits, and narrative model responses where structured JSON was required. A fallback report can preserve dozens of source findings while still lacking a balanced differential or reliable synthesis.
+
+\section{Discussion}
+The evaluation supports the claim that typed orchestration makes operational failure more observable than a single-prompt workflow. A downstream reader can distinguish “not screened” from “screened negative,” “written report available” from “direct image read complete,” and “provider failed” from “no abnormality found.” Runtime replanning provides a controlled response to disagreement without erasing successful original evidence. These properties are aligned with the reporting and implementation concerns raised by CLAIM and clinical AI deployment guidance \cite{mongan2020claim,recht2020integrating}.
+
+The results also identify the limits of the current system. Historical provider failures are not model false negatives. Unknown modality metadata can prevent screening before image interpretation is attempted. Mispaired fixtures invalidate aggregate clinical claims. Direct image coverage is sparse, series completeness is not established by file presence, and a generative vision model may hallucinate or overinterpret a written report. Most importantly, the saved collections lack clinician-adjudicated reference standards and contain document-only cases. Therefore, a conference claim should be framed as architecture and operational safety evidence, not as diagnostic validation.
+
+Threats to validity include retrospective artifact selection, changing backend availability, possible model/cache version drift, small and non-independent saved cases, ambiguous fixture identity, and the inability of exact source binding to establish semantic entailment. The 82-test suite uses controlled stubs and synthetic inputs; it demonstrates software behavior, not performance on clinical populations. A subsequent evaluation should repair the manifest, use patient-level partitions and clinical adjudication, stratify by modality and coverage, report provider/cache conditions, and score direct-image and written-report tasks separately.
+
+\section{Conclusion}
+MedicalAOS implements a capability-aware, provenance-preserving approach to heterogeneous medical study analysis. Its principal contribution is not a universal diagnostic model but an execution and evidence layer that constrains model routing, preserves source identity, contains partial failures, records bounded adaptation, and prevents missing interpretation from being silently rendered as normality. In the available evaluation, all 82 focused offline regression tests passed, while the 20 historical saved runs exposed both useful evidence organization and substantial backend, fixture, metadata, and coverage limitations. These findings justify further clinical evaluation of the workflow design, but they do not justify claims of diagnostic accuracy or autonomous clinical use.
+
+\section*{Research Integrity and AI-Use Statement}
+This manuscript was prepared from the MedicalAOS source tree, its saved execution artifacts, and its offline regression tests. Numerical results are reported only for the executed test suite and documented historical collections. The manuscript does not claim regulatory clearance, clinical validation, or diagnostic performance. The authors should replace the bracketed author and affiliation fields, verify the final conference template, disclose permitted AI assistance, and obtain required institutional or ethics review before submission.
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}

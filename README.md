@@ -60,7 +60,9 @@ reasoning. Original plans and runtime revisions remain auditable:
 [adaptive verification and imaging](docs/ADAPTIVE_IMAGING.md).
 
 See [docs/SCREENING_CASCADE.md](docs/SCREENING_CASCADE.md) for the model
-roster, benchmark numbers and — importantly — where it breaks.
+roster, benchmark numbers and coverage behavior. The current capability and
+model-registry snapshot is maintained in
+[docs/PROJECT_REPORT_READINESS.md](docs/PROJECT_REPORT_READINESS.md).
 
 ## Quick start
 
@@ -195,7 +197,7 @@ python evaluate_images.py --studies ./cases/chest-xray ./cases/head-ct
 main.py              CLI                  pipeline.py    stage sequencing
 models.py            every type           config.py      all settings
 ingest/              folder → Study       agents/        orchestration
-capabilities/        the only layer that calls models
+capabilities/        registered model/tool capabilities and model registry
 reporting/           report → markdown + JSON
 core/                errors, logging, retry, cache
 tests/               offline tests, no network, no weights
@@ -222,9 +224,14 @@ the worst finding.
 | [MODELS.md](docs/MODELS.md) | The model roster, routing, swapping checkpoints |
 | [PERFORMANCE.md](docs/PERFORMANCE.md) | Where time goes, measured optimisations, tuning by hardware |
 | [SAFETY.md](docs/SAFETY.md) | Clinical safeguards, privacy, deployment checklist |
+| [SCREENING_CASCADE.md](docs/SCREENING_CASCADE.md) | Modality-aware screening, specialist confirmation, coverage and benchmarks |
+| [ADAPTIVE_IMAGING.md](docs/ADAPTIVE_IMAGING.md) | Task contracts, bounded verification, DICOM series context and evaluation lanes |
+| [CHAT_TUI.md](docs/CHAT_TUI.md) | Interactive chat, persistent sessions and layered evidence memory |
 | [AOS_IMPROVEMENTS.md](docs/AOS_IMPROVEMENTS.md) | 20-component AOS audit, longitudinal reasoning, changes and roadmap |
 | [TEST_RUN_ANALYSIS.md](docs/TEST_RUN_ANALYSIS.md) | Analysis of all indexed disease runs, failure causes and timing evidence |
+| [SAVED_CASE_AUDIT.md](docs/SAVED_CASE_AUDIT.md) | Audit of saved plan/result pairs and fixture identity |
 | [AGENT_CONTEXT_REVIEW.md](docs/AGENT_CONTEXT_REVIEW.md) | Relevant Claude/OpenCode/Omnirush project history recovered for this work |
+| [PROJECT_REPORT_READINESS.md](docs/PROJECT_REPORT_READINESS.md) | Current report-ready scope, registry, capabilities and verification snapshot |
 
 ## Requirements
 

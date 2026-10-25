@@ -140,7 +140,7 @@ plus `--no-literature`, which removes a search and an LLM call from the graph.
 ### Large series (CT/MR)
 
 ```bash
-MAOS_MAX_IMAGES=48         # default 24; images above this are evenly sampled
+MAOS_MAX_IMAGES=48         # default 0 = all decoded images; positive values sample evenly
 ```
 
 Raising it increases VLM calls proportionally. The loader samples evenly across

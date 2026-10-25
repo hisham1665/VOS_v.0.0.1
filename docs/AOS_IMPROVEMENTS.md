@@ -250,8 +250,12 @@ cases and other products require equal-input benchmarks before comparing speed.
 
 ## Verification
 
-Final offline result: **235 passed in 8.54s** — 31 new regression cases plus
-204 legacy cases. Python compilation and the CRLF-aware whitespace check pass.
+Historical compatibility snapshot from 2026-10-05: **235 passed in 8.54s** —
+31 new regression cases plus 204 legacy cases. Python compilation and the
+CRLF-aware whitespace check passed for that snapshot. The current workspace
+verification is recorded in
+[PROJECT_REPORT_READINESS.md](PROJECT_REPORT_READINESS.md#verification-snapshot)
+and [tests/TEST_RESULTS.md](../tests/TEST_RESULTS.md).
 Verification used an isolated Python environment under `/tmp/omnirush/`.
 
 Run the new checked-in regressions with the project's installed dependencies:

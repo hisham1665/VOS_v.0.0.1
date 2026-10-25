@@ -46,7 +46,7 @@ main.py / pipeline.py          entry points, CLI, stage sequencing
 │   ├── registry.py            capability DNA, discovery and request/result contract
 │   ├── text_catalog.py        live model profiles for task-aware selection
 │   ├── hf_backend.py          local/remote routing, model cache, GPU semaphore
-│   └── (seven capabilities)
+│   └── 13 registered capabilities (including verification)
 ├── reporting/report_builder.py  report → markdown + JSON
 ├── core/                      errors, logging, retry, cache, generic routing, evidence evaluation
 └── models.py                  every type, pydantic, fully serialisable
@@ -91,13 +91,17 @@ Green runs locally, orange is a hosted model call, grey touches no model.
 
 | Stage | Capability | Model class | Why it exists |
 |---|---|---|---|
+| Quality | `image_quality` | Deterministic pixel/series checks | Detects unusable pixels and records supplied-series coverage before model inference. |
 | Triage | `modality_triage` | CLIP, ~600MB local | A VLM prompt that knows it is looking at a chest PA film reads far better than one that does not. Also catches files that are not medical images. |
 | Screen | `image_classification` | ViT, ~330MB local | A checkable probability the narrative read can be tested against. |
+| Confirm | `specialist_confirmation` | Modality-specific specialists | Re-checks candidates and question-driven conditions with independent models where available. |
 | Read | `vision` | Medical VLM, hosted | The actual image interpretation. Image reads run in parallel. |
 | Documents | `document_analysis` | Text/VLM backend | Classify and extract findings from PDF/text/office pages with source refs. |
 | Consolidate | `cross_image_synthesis` | Text LLM | Images were read in isolation; the study is one patient. Merges duplicates, surfaces disagreements. |
+| Verification | `document_verification`, `temporal_comparison`, `evidence_verification` | Rendered-page, temporal and provenance checks | Adds bounded source, chronology and numeric verification when requested by the running graph. |
 | Literature | `web_search` | Text LLM + search | Differential and next-investigation context for the findings raised. |
 | Report | `report_synthesis` | Text LLM | Impression, triage level, recommended next steps. |
+| Utility | `summarization` | Text summarizer | Provides bounded text condensation when a workflow requests it. |
 
 ## Dependency-ready scheduling and recovery
 

@@ -11,7 +11,7 @@ model alias and URL. All are overridable by environment variable.
 | VLM fallback | `MAOS_REPORT_VLM_FALLBACK` | `Qwen/Qwen2.5-VL-7B-Instruct` | ~15GB fp16 | Hosted |
 | Modality/region triage | `MAOS_MODALITY_CLIP` | `flaviagiammarino/pubmed-clip-vit-base-patch32` | ~600MB | Local |
 | Non-medical gate | `MAOS_NONMEDICAL_CLIP` | `openai/clip-vit-base-patch32` | ~600MB | Local |
-| Screening cascade | `MAOS_MODEL_ZOO` (JSON) | 12 checkpoints incl. TorchXRayVision, see `capabilities/model_zoo.py` | 0.1-0.4GB each | Local |
+| Screening cascade | `MAOS_MODEL_ZOO` (JSON) | 13 registry entries: 10 enabled and 3 retained disabled after development checks, see `capabilities/model_zoo.py` | 0.1-0.4GB each | Local |
 | Text summariser | `MAOS_SUMMARIZER` | `facebook/bart-large-cnn` | ~1.6GB | Hosted fallback |
 | Text LLM | `MAOS_TEXT_LLM` | `openai/gpt-oss-120b` (Groq) | — | Hosted |
 
@@ -163,6 +163,11 @@ Sources: [official MedGemma 1.5](https://huggingface.co/google/medgemma-1.5-4b-i
 The single pneumonia classifier was replaced by a routed, two-stage cascade.
 Roster, benchmark numbers, disabled models and failure modes:
 [SCREENING_CASCADE.md](SCREENING_CASCADE.md).
+
+The exact current registry snapshot, including every key, model id, role,
+modality/region route, targets and enabled state, is recorded in
+[PROJECT_REPORT_READINESS.md](PROJECT_REPORT_READINESS.md#current-capability-registry)
+and is sourced from `capabilities/model_zoo.py`.
 
 To add, replace or disable a model without code changes, point
 `MAOS_MODEL_ZOO` at a JSON list of entries using the `ZooModel` fields:

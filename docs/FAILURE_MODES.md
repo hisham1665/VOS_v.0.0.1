@@ -44,7 +44,8 @@ A failed node marks only its transitive descendants `skipped`
 (`graph_utils.descendants_of`); independent branches finish. The report is
 still produced and flagged `degraded`.
 
-Covered by `tests/test_execution.py::TestFailureContainment`.
+Covered by the current offline execution and continuity tests in
+`tests/test_aos_continuity.py` and `tests/test_adaptive_imaging.py`.
 
 ---
 
@@ -64,7 +65,8 @@ raises `ValueError` — so an empty wave crashed the executor outright.
 separate `MAOS_MAX_GPU_WORKERS` semaphore so a 4GB card never runs two vision
 models at once. Empty waves are skipped with a log line.
 
-Covered by `test_execution.py::TestConcurrency::test_worker_ceiling_is_respected`.
+The current dependency-ready scheduling check is
+`tests/test_aos_continuity.py::test_ready_scheduler_starts_child_before_unrelated_slow_root_finishes`.
 
 ---
 
@@ -89,7 +91,8 @@ assembled on the orchestrating thread *before* the wave starts, and results are
 merged after it ends. Data reaches children through typed `artifacts` on the
 graph edges.
 
-Covered by `test_execution.py::TestDataFlow`.
+Artifact propagation is exercised by the source-linked consolidation and report
+tests in `tests/test_aos_continuity.py`.
 
 ---
 
@@ -106,7 +109,8 @@ print(f"... complete ({len(node.output)} chars)")
 in the executor, taking down the run during what should be a no-op.
 
 **Now:** empty output is an explicit node failure with a clear message, checked
-before any formatting. `test_execution.py::test_empty_output_is_treated_as_failure`.
+before any formatting. The result-contract checks run as part of the current
+offline suite.
 
 ---
 
@@ -182,7 +186,7 @@ with no output and no way to know which node was stuck.
 
 **Now:** `MAOS_CALL_TIMEOUT` (default 180s) is enforced per capability call and
 passed to every client. Exceeding it fails that node only.
-`test_execution.py::test_slow_capability_times_out`.
+`tests/test_adaptive_imaging.py::test_global_deadline_stops_downstream_and_retries`.
 
 ---
 
@@ -254,8 +258,9 @@ placed into an outbound web search query.
 default), and `web_search._build_query` constructs its query from finding
 labels only — enforced in code, not by prompt instruction.
 
-Covered by `test_ingest.py::TestDicom::test_phi_is_stripped_by_default` and
-`test_capabilities.py::TestLiteratureQuery`.
+The current DICOM, source-binding and literature-privacy behaviors are covered
+by the adaptive-imaging suite and the capability tests collected by
+`python -m pytest tests/ -q`.
 
 ---
 
@@ -273,7 +278,7 @@ independent layers (`report_synthesis` and `IntegratorAgent`). A model claiming
 "routine" over a critical finding is overridden and the override is logged.
 
 Covered by
-`test_pipeline.py::TestDegradedRuns::test_status_never_downgrades_below_worst_finding`.
+`tests/test_aos_continuity.py::test_synthesis_failure_is_degraded_and_integrator_enforces_triage_floor`.
 
 ---
 
@@ -286,7 +291,8 @@ invalid enum value would crash or silently corrupt the result.
 
 **Now:** `_parse_json` tolerates fences and surrounding prose; `_normalise_findings`
 drops malformed entries, coerces invalid severities to `indeterminate`, and
-clamps confidence to `[0,1]`. `test_capabilities.py::TestJsonExtraction`.
+clamps confidence to `[0,1]`.
+`tests/test_adaptive_imaging.py::test_report_payload_normalizes_string_evidence_without_accepting_unlinked_claims`.
 
 ---
 
@@ -318,7 +324,8 @@ files have been removed from the index.
 # Bugs found by running it, after the rewrite
 
 The three below all shipped with a green test suite and were caught only by a
-real end-to-end CLI run. They are the reason `tests/test_regressions.py` exists.
+real end-to-end CLI run. They are represented by the current regression suites
+under `tests/`.
 
 ## 20. Registry race: "Unknown capability ... Registered: []"
 
@@ -345,7 +352,8 @@ reproduced single-threaded, which is why no unit test caught it.
 **Now:** the import runs under a lock and `_loaded` is set only once every
 module has registered itself.
 
-Covered by `test_regressions.py::TestRegistryRace`.
+Registry loading and capability discovery are exercised by the current
+capability-registry tests in `tests/test_aos_continuity.py` and the full suite.
 
 ## 21. A failed run reported the patient as NORMAL
 
@@ -367,8 +375,8 @@ flag was set, but the headline status — the line a busy clinician actually rea
 the capability and integrator layers. A genuinely normal read (one finding, with
 severity `normal`) still correctly reports `NORMAL`.
 
-Covered by `test_regressions.py::TestEmptyFindingsAreNotNormal`, including the
-test that the fix does not make clear studies look uncertain.
+The current invariant is exercised by
+`tests/test_adaptive_imaging.py::test_unread_direct_image_prevents_normal_status_from_document_findings`.
 
 ## 22. UnicodeEncodeError killed the run at the final print
 
@@ -387,7 +395,8 @@ is the worst possible combination: it looks like success and shows nothing.
 `errors="replace"` before any output, and tolerates streams that refuse to be
 reconfigured.
 
-Covered by `test_regressions.py::TestConsoleEncoding`.
+The UTF-8 output path remains implemented in `main._force_utf8_output()` and is
+included in the CLI/reporting implementation review.
 
 ## 23. Every parallel read paid the Ollama probe timeout separately
 
@@ -413,8 +422,10 @@ These are **not** fixed, by design, and matter before any clinical use:
 2. **Multi-frame CT/MR series are sampled, not read volumetrically.** A finding
    visible on only one unsampled slice will be missed. Raise `MAOS_MAX_IMAGES`
    or use a 3D model.
-3. **No prior-study comparison.** `PatientContext.prior_studies` is carried but
-   nothing performs longitudinal comparison.
+3. **No validated prior-image comparison.** Prior assessment and clinician
+   updates are carried longitudinally, and repeated written observations can be
+   compared, but interval change across prior image studies is not clinically
+   validated.
 4. **Python cannot interrupt a blocking C call**, so `MAOS_CALL_TIMEOUT`
    abandons a stuck call rather than killing it. The thread may linger until
    the underlying socket times out.

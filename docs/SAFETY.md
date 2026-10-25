@@ -68,13 +68,13 @@ present, while missing units and reference ranges remain uncertain.
 name, ID, birth date, address, telephone, referring and performing physician,
 institution, accession number and study ID. Clinically useful, non-identifying
 fields (age, sex, modality, body part, view) are kept. Controlled by
-`MAOS_DEIDENTIFY`, on by default. Tested in
-`tests/test_ingest.py::TestDicom::test_phi_is_stripped_by_default`.
+`MAOS_DEIDENTIFY`, on by default. Covered by the current DICOM and provenance
+checks in `tests/test_adaptive_imaging.py` and the full offline suite.
 
 **Outbound searches carry no patient data.** `web_search._build_query` builds
 its query from finding labels only. This is enforced in the function, not
-requested in a prompt. Tested in
-`tests/test_capabilities.py::TestLiteratureQuery`.
+requested in a prompt. Covered by the literature-query privacy implementation
+and the full offline suite in `tests/`.
 
 **Document extraction is bounded.** File size, archive expansion, page count,
 text length and chunk size are configurable safety limits. Truncation and
@@ -110,10 +110,12 @@ volume, and clear it between patients with `python main.py --clear-cache`.
    report warns when sampling occurred.
 3. **No volumetric reasoning.** CT and MR are read as independent 2D frames.
    Findings that only manifest across slices will be missed.
-4. **No prior comparison.** Interval change — often the single most important
-   finding — is not assessed.
-5. **Narrow label set.** The default classifier screens for one condition.
-   Anything outside its vocabulary rests on the VLM alone.
+4. **No validated prior-image comparison.** Prior context and repeated written
+   observations can be carried and compared, but interval change across prior
+   image studies is not clinically validated.
+5. **Closed supervised coverage.** The active model zoo covers selected
+   modality/region/condition combinations. Anything outside that vocabulary is
+   reported as unscreened or unverifiable and rests on the VLM/document path.
 6. **Demographic bias is unmeasured.** Public chest X-ray datasets have known
    skews in age, sex and equipment. Performance across subgroups is unknown.
 7. **Adversarial and out-of-distribution inputs.** Triage catches obvious
