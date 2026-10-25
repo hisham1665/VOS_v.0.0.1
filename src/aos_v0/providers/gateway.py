@@ -112,15 +112,28 @@ class ModelGateway:
         response = self.complete(role, **kwargs)
         return response.choices[0].message.content or ""
 
-    def image(self, path: str, instruction: str | None = None) -> str:
+    def image(
+        self,
+        path: str,
+        instruction: str | None = None,
+        *,
+        role: str = "vision",
+        structured: bool = False,
+    ) -> str:
+        """Send one image to a configured multimodal model profile.
+
+        ``role`` keeps the core gateway provider-neutral while allowing domain
+        adapters such as exam OCR to select a dedicated model profile. The
+        default remains ``vision`` for backwards compatibility. Structured JSON
+        output is opt-in because some local VLMs do not implement JSON mode.
+        """
         file = Path(path)
         if not file.is_file():
             raise FileNotFoundError(f"Vision requires an image file: {path}")
         mime = mimetypes.guess_type(path)[0] or "image/png"
         data = base64.b64encode(file.read_bytes()).decode("ascii")
-        response = self.complete(
-            "vision",
-            messages=[
+        kwargs = {
+            "messages": [
                 {
                     "role": "user",
                     "content": [
@@ -129,7 +142,13 @@ class ModelGateway:
                     ],
                 }
             ],
-            temperature=0.2,
+            "temperature": 0.2,
+        }
+        if structured:
+            kwargs["response_format"] = {"type": "json_object"}
+        response = self.complete(
+            role,
+            **kwargs,
         )
         return response.choices[0].message.content or ""
 

@@ -91,6 +91,10 @@ def _models() -> dict[str, ModelProfile]:
         "dna_strong": ModelProfile(model="openai/gpt-oss-120b"),
         "synthesis": ModelProfile(model="openai/gpt-oss-120b", max_tokens=4096),
         "vision": ModelProfile(provider="ollama", model="medgemma1.5:latest", api_key_env="", base_url="http://localhost:11434/v1"),
+        # Dedicated OCR profile. Keep it separate from general vision so an
+        # operator can use an OCR-specialized model (for example
+        # deepseek-ocr:3b) without changing unrelated AOS vision tasks.
+        "ocr": ModelProfile(provider="ollama", model="deepseek-ocr:3b", api_key_env="", base_url="http://localhost:11434/v1", max_tokens=4096),
         "audio": ModelProfile(model="whisper-large-v3-turbo"),
     }
 

@@ -167,6 +167,15 @@ Reports include:
 - `batch_report.txt`
 - one text report per student under `reports/`
 
+Inspect and resolve uncertain papers in the persistent review queue:
+
+```bash
+aos exam review review_store list
+aos exam review review_store show paper-001:Q3
+aos exam review review_store resolve paper-001:Q3 \
+  --decision modify --marks 4.5 --reviewer examiner-1
+```
+
 ### 7. Run paper-evaluation research
 
 Generate a starter ground-truth dataset and run the built-in experiments:

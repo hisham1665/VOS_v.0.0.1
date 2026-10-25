@@ -2,12 +2,15 @@
 
 Two families live here:
 
+  * **Remote vision adapters** for configured Hugging Face and Ollama
+    multimodal models. They send a normalized page image with a strict JSON
+    transcription prompt and convert the response into the domain OCR schema.
+    They are lazy: no client or network connection is created at import time.
+
   * **Declared adapters** for the Phase-1 selected models (PP-OCRv6, TrOCR
-    printed/handwritten, Qwen2.5-VL). They carry the model's identity from
-    `exam/model_selection.py` and the capabilities it serves, but their
-    `run()` raises :class:`OcrUnavailableError`: no execution transport exists
-    yet (integration-spec gap G3 -- PaddleOCR/Transformers/vLLM wiring is
-    Phase 8). This mirrors the declared-only exam resources.
+    printed/handwritten, Qwen2.5-VL). They remain available as honest metadata
+    and future line-OCR slots, but their `run()` raises
+    :class:`OcrUnavailableError` until their specialised transports are added.
 
   * **LocalStructuralAdapter** -- a runnable, pure-Pillow engine with no ML
     dependencies. It detects text-line bands and bounding boxes on a clean
@@ -22,7 +25,13 @@ Two families live here:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+import base64
+from io import BytesIO
+import json
+import os
+from pathlib import Path
+import tempfile
+from typing import Any, Callable, List, Mapping, Optional
 
 from PIL import Image, ImageStat
 
@@ -33,6 +42,7 @@ from aos_v0.exam.ocr.models import (
     OcrRecognitionError,
     OcrUnavailableError,
 )
+from aos_v0.providers.errors import ProviderError
 
 #: Structural confidence ceiling: the local engine can place ink correctly but
 #: cannot read it, so it must never report a transcription-confidence above the
@@ -59,6 +69,333 @@ class OcrAdapter(ABC):
     @abstractmethod
     def run(self, image: Image.Image, hints: Optional[dict] = None) -> List[OcrBlock]:
         """OCR one normalized page image into blocks (may raise OcrError)."""
+
+
+# ---------------------------------------------------------------------------
+# Shared remote-VLM contract
+# ---------------------------------------------------------------------------
+
+
+OCR_JSON_PROMPT = """You are transcribing one scanned student answer-booklet page.
+Return JSON only, with this exact top-level shape:
+{"blocks":[{"type":"text|header|question_label|answer|table|diagram|figure|formula",
+"text":"...","bbox":[x1,y1,x2,y2],"confidence":0.0,"transcribed":true}],
+"page_confidence":0.0}
+
+The image pixel dimensions are supplied separately. Use pixel coordinates with a
+top-left origin. Preserve the student's written words, spelling, punctuation,
+engineering symbols, units, subscripts, superscripts, and mathematical steps.
+Represent a formula as type "formula" and use readable LaTeX when possible.
+Represent a table or diagram as its own block and describe only visible labels,
+connections, values, or shapes. Do not solve, correct, summarize, or infer
+missing content. If a region cannot be read, emit an empty text block with
+transcribed=false and low confidence instead of guessing. Keep blocks in
+top-to-bottom, left-to-right reading order. Confidence is a conservative
+readability estimate in [0,1], not a correctness score.
+"""
+
+
+_BLOCK_TYPE_ALIASES = {
+    "heading": OcrBlockType.HEADER,
+    "title": OcrBlockType.HEADER,
+    "question": OcrBlockType.QUESTION_LABEL,
+    "question_number": OcrBlockType.QUESTION_LABEL,
+    "question-label": OcrBlockType.QUESTION_LABEL,
+    "response": OcrBlockType.ANSWER,
+    "equation": OcrBlockType.FORMULA,
+    "math": OcrBlockType.FORMULA,
+    "image": OcrBlockType.FIGURE,
+}
+
+
+def _image_data_url(image: Image.Image) -> str:
+    """Encode a page as a portable PNG data URL for HF chat completion."""
+    buffer = BytesIO()
+    image.convert("RGB").save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _number(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _bbox(value: Any, size: tuple[int, int], fallback: List[int]) -> List[int]:
+    """Normalize pixel or [0,1] model coordinates into a valid page bbox."""
+    width, height = size
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return fallback
+    numbers = [_number(item, -1) for item in value]
+    if any(item < 0 for item in numbers):
+        return fallback
+    if max(numbers) <= 1.0 and width > 1 and height > 1:
+        numbers = [
+            numbers[0] * width,
+            numbers[1] * height,
+            numbers[2] * width,
+            numbers[3] * height,
+        ]
+    x1, y1, x2, y2 = [int(round(item)) for item in numbers]
+    x1 = max(0, min(width, x1))
+    y1 = max(0, min(height, y1))
+    x2 = max(0, min(width, x2))
+    y2 = max(0, min(height, y2))
+    if x2 <= x1 or y2 <= y1:
+        return fallback
+    return [x1, y1, x2, y2]
+
+
+def _block_type(value: Any) -> OcrBlockType:
+    normalized = str(value or "text").strip().lower().replace(" ", "_")
+    return _BLOCK_TYPE_ALIASES.get(normalized, OcrBlockType(normalized)
+                                  if normalized in {item.value for item in OcrBlockType}
+                                  else OcrBlockType.TEXT)
+
+
+def _json_payload(text: str) -> Any:
+    """Parse JSON from a model response, including fenced/leading prose."""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        cleaned = "\n".join(lines[1:-1]).strip() if len(lines) > 2 else ""
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        decoder = json.JSONDecoder()
+        for marker in ("{", "["):
+            start = cleaned.find(marker)
+            if start < 0:
+                continue
+            try:
+                value, _ = decoder.raw_decode(cleaned[start:])
+                return value
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
+def parse_ocr_response(response: Any, size: tuple[int, int]) -> List[OcrBlock]:
+    """Turn a VLM response into safe structured blocks.
+
+    A plain-text response is retained as a full-page, low-confidence block so
+    operators can review it, but it cannot pass the normal 0.6 acceptance gate
+    without a model-provided structured confidence.
+    """
+    raw_text = response if isinstance(response, str) else json.dumps(response)
+    payload = _json_payload(raw_text)
+    page_confidence: Optional[float] = None
+    items: Any = None
+    if isinstance(payload, Mapping):
+        items = payload.get("blocks") or payload.get("regions")
+        page_confidence = _number(
+            payload.get("page_confidence", payload.get("confidence")), -1
+        )
+        if items is None and payload.get("text") is not None:
+            items = [payload]
+    elif isinstance(payload, list):
+        items = payload
+
+    if not isinstance(items, list):
+        text = raw_text.strip()
+        if not text:
+            raise OcrRecognitionError("OCR model returned an empty response")
+        return [
+            OcrBlock(
+                type=OcrBlockType.TEXT,
+                text=text,
+                bbox=[0, 0, size[0], size[1]],
+                confidence=0.55,
+                transcribed=True,
+            )
+        ]
+
+    blocks: List[OcrBlock] = []
+    count = max(1, len(items))
+    width, height = size
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping):
+            continue
+        text_value = item.get("text", item.get("content", ""))
+        text = text_value if isinstance(text_value, str) else str(text_value or "")
+        fallback = [0, (index * height) // count, width,
+                    ((index + 1) * height) // count]
+        bbox = _bbox(item.get("bbox", item.get("box")), size, fallback)
+        transcribed = bool(item.get("transcribed", bool(text.strip())))
+        confidence_default = page_confidence if page_confidence >= 0 else 0.55
+        confidence = max(
+            0.0,
+            min(1.0, _number(item.get("confidence", item.get("score")),
+                              confidence_default)),
+        )
+        if not text.strip() or not transcribed:
+            transcribed = False
+            confidence = min(confidence, 0.25)
+        blocks.append(
+            OcrBlock(
+                type=_block_type(item.get("type")),
+                text=text,
+                bbox=bbox,
+                confidence=round(confidence, 4),
+                transcribed=transcribed,
+            )
+        )
+    if not blocks:
+        raise OcrRecognitionError("OCR model returned no readable blocks")
+    return blocks
+
+
+class _RemoteOcrAdapter(OcrAdapter):
+    """Common prompt/response handling for remote multimodal OCR models."""
+
+    capabilities = ["document.ocr", "document.layout", "handwriting.ocr",
+                    "vision.understanding"]
+
+    def __init__(self, *, generator: Optional[Callable[[Image.Image, str], Any]] = None):
+        self._generator = generator
+
+    def _generate(self, image: Image.Image, prompt: str) -> Any:
+        raise NotImplementedError
+
+    def run(self, image: Image.Image, hints: Optional[dict] = None) -> List[OcrBlock]:
+        if hints and hints.get("blank"):
+            return []
+        prompt = (
+            f"{OCR_JSON_PROMPT}\nPage pixel dimensions: {image.width} x {image.height}."
+        )
+        if hints:
+            issues = ", ".join(sorted(key for key, value in hints.items() if value))
+            if issues:
+                prompt += f"\nKnown scan issues: {issues}. Be extra conservative."
+        try:
+            response = self._generate(image, prompt)
+        except OcrError:
+            raise
+        except ProviderError as exc:
+            raise OcrUnavailableError(f"{self.adapter_id} provider unavailable: {type(exc).__name__}") from exc
+        except (ConnectionError, TimeoutError, OSError, ValueError) as exc:
+            raise OcrUnavailableError(
+                f"{self.adapter_id} transport unavailable: {type(exc).__name__}"
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - adapter boundary is typed below
+            raise OcrUnavailableError(
+                f"{self.adapter_id} transport failed: {type(exc).__name__}"
+            ) from exc
+        return parse_ocr_response(response, (image.width, image.height))
+
+
+class OllamaOcrAdapter(_RemoteOcrAdapter):
+    """OCR through an Ollama OpenAI-compatible multimodal endpoint.
+
+    The default is ``deepseek-ocr:3b`` because it is OCR-focused. Operators can
+    choose another installed vision model in ``aos.yaml`` under ``models.ocr``
+    or with ``AOS_OLLAMA_OCR_MODEL``. The gateway is constructed only on first
+    use, preserving offline imports and tests.
+    """
+
+    adapter_id = "ollama_ocr"
+    model_name = "deepseek-ocr:3b"
+    model_repo = "ollama/deepseek-ocr"
+    description = "Configured Ollama OCR/VLM adapter with structured JSON output."
+
+    def __init__(
+        self,
+        *,
+        model: Optional[str] = None,
+        profile: str = "ocr",
+        gateway: Any = None,
+        generator: Optional[Callable[[Image.Image, str], Any]] = None,
+    ):
+        super().__init__(generator=generator)
+        self.model_name = model or os.environ.get("AOS_OLLAMA_OCR_MODEL", self.model_name)
+        self.profile = profile
+        self._gateway = gateway
+
+    def _generate(self, image: Image.Image, prompt: str) -> Any:
+        if self._generator is not None:
+            return self._generator(image, prompt)
+        if self._gateway is None:
+            from aos_v0.providers.gateway import ModelGateway
+            from aos_v0.settings import load_settings
+
+            settings = load_settings()
+            if self.profile not in settings.models:
+                raise OcrUnavailableError(
+                    f"AOS model profile '{self.profile}' is not configured"
+                )
+            # Environment/model overrides are applied to a fresh settings object,
+            # never to the process-global YAML or another request's gateway.
+            settings.models[self.profile].model = self.model_name
+            self._gateway = ModelGateway(settings)
+        temporary = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        path = Path(temporary.name)
+        try:
+            temporary.close()
+            image.convert("RGB").save(path, format="PNG")
+            return self._gateway.image(str(path), instruction=prompt, role=self.profile)
+        finally:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+class HuggingFaceOcrAdapter(_RemoteOcrAdapter):
+    """OCR through Hugging Face Inference Providers chat vision models."""
+
+    adapter_id = "huggingface_ocr"
+    model_name = "Qwen/Qwen2.5-VL-7B-Instruct"
+    model_repo = model_name
+    description = "Configured Hugging Face multimodal OCR/VLM adapter."
+
+    def __init__(
+        self,
+        *,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        token: Optional[str] = None,
+        client: Any = None,
+        generator: Optional[Callable[[Image.Image, str], Any]] = None,
+    ):
+        super().__init__(generator=generator)
+        self.model_name = model or os.environ.get(
+            "AOS_HF_OCR_MODEL", self.model_name
+        )
+        self.model_repo = self.model_name
+        self._provider_name = provider
+        self._token = token
+        self._client = client
+        self._provider = None
+
+    def _generate(self, image: Image.Image, prompt: str) -> Any:
+        if self._generator is not None:
+            return self._generator(image, prompt)
+        if self._provider is None:
+            from aos_v0.providers.hf import HFProvider
+
+            self._provider = HFProvider(
+                token=self._token or os.environ.get("HF_TOKEN") or os.environ.get("HUG"),
+                model=self.model_name,
+                provider=self._provider_name,
+                client=self._client,
+            )
+        result = self._provider.execute(
+            model=self.model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": _image_data_url(image)}},
+                    ],
+                }
+            ],
+            temperature=0.0,
+            max_tokens=4096,
+        )
+        return result.text
 
 
 # ---------------------------------------------------------------------------
@@ -344,10 +681,25 @@ class LocalStructuralAdapter(OcrAdapter):
 # ---------------------------------------------------------------------------
 
 
-def default_adapters(strategy: str = "auto", *, local: bool = True) -> List[OcrAdapter]:
-    """The fallback chain for a strategy (plan Phase 4 ladder)."""
-    printed = [PaddleOcrAdapter(), TrocrPrintedAdapter()]
-    handwritten = [TrocrHandwrittenAdapter(), TrocrLargeHandwrittenAdapter()]
+def default_adapters(
+    strategy: str = "auto",
+    *,
+    local: bool = True,
+    remote: bool = False,
+) -> List[OcrAdapter]:
+    """Build the fallback chain for a strategy.
+
+    ``remote`` is explicit so library callers and tests remain deterministic and
+    offline by default. The CLI and the full exam orchestrator opt in because
+    they are the real model-backed application paths. Every remote adapter is
+    still lazy and an unavailable provider simply leaves the page for the next
+    adapter or human review.
+    """
+    def _remote() -> List[OcrAdapter]:
+        return [OllamaOcrAdapter(), HuggingFaceOcrAdapter()] if remote else []
+
+    printed = _remote() + [PaddleOcrAdapter(), TrocrPrintedAdapter()]
+    handwritten = _remote() + [TrocrHandwrittenAdapter(), TrocrLargeHandwrittenAdapter()]
     vision = [QwenVlOcrAdapter()]
     chain: List[OcrAdapter]
     if strategy == "handwritten":
@@ -355,7 +707,12 @@ def default_adapters(strategy: str = "auto", *, local: bool = True) -> List[OcrA
     elif strategy == "printed":
         chain = printed + vision
     else:
-        chain = printed + handwritten + vision
+        chain = _remote() + [
+            PaddleOcrAdapter(),
+            TrocrPrintedAdapter(),
+            TrocrHandwrittenAdapter(),
+            TrocrLargeHandwrittenAdapter(),
+        ] + vision
     if local:
         chain = chain + [LocalStructuralAdapter()]
     return chain

@@ -53,6 +53,15 @@ models:
     model: medgemma1.5:latest
     api_key_env: ""
     base_url: http://localhost:11434/v1
+  # OCR is intentionally a separate profile. Install the selected Ollama
+  # model (`ollama pull deepseek-ocr:3b`) or replace this with another
+  # OpenAI-compatible multimodal model. Credentials stay in .env.
+  ocr:
+    provider: ollama
+    model: deepseek-ocr:3b
+    api_key_env: ""
+    base_url: http://localhost:11434/v1
+    max_tokens: 4096
   audio:
     provider: groq
     model: whisper-large-v3-turbo

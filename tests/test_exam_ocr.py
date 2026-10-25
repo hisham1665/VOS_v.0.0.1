@@ -25,14 +25,17 @@ from PIL import Image, ImageDraw
 from aos_v0.exam.intake import ingest
 from aos_v0.exam.models import EvalReviewReason
 from aos_v0.exam.ocr.adapters import (
+    HuggingFaceOcrAdapter,
     LocalStructuralAdapter,
     OcrAdapter,
+    OllamaOcrAdapter,
     PaddleOcrAdapter,
     QwenVlOcrAdapter,
     TrocrHandwrittenAdapter,
     TrocrLargeHandwrittenAdapter,
     TrocrPrintedAdapter,
     default_adapters,
+    parse_ocr_response,
 )
 from aos_v0.exam.ocr.confidence import (
     document_confidence,
@@ -188,6 +191,85 @@ class DeclaredAdapterTests(unittest.TestCase):
     def test_local_can_be_omitted(self):
         chain = default_adapters("auto", local=False)
         self.assertNotIn("local_structural", [a.adapter_id for a in chain])
+
+
+class RemoteAdapterTests(unittest.TestCase):
+    def test_structured_response_preserves_engineering_blocks(self):
+        blocks = parse_ocr_response(
+            """```json
+            {"blocks": [
+              {"type": "question_label", "text": "Q1.",
+               "bbox": [0.1, 0.1, 0.3, 0.2], "confidence": 0.94},
+              {"type": "formula", "text": "V = IR",
+               "bbox": [20, 200, 400, 260], "confidence": 0.82},
+              {"type": "diagram", "text": "", "bbox": [20, 300, 500, 700],
+               "confidence": 0.7, "transcribed": false}
+            ], "page_confidence": 0.88}
+            ```""",
+            (1000, 800),
+        )
+        self.assertEqual([b.type for b in blocks], [
+            OcrBlockType.QUESTION_LABEL, OcrBlockType.FORMULA, OcrBlockType.DIAGRAM
+        ])
+        self.assertEqual(blocks[0].bbox, [100, 80, 300, 160])
+        self.assertTrue(blocks[1].transcribed)
+        self.assertFalse(blocks[2].transcribed)
+        self.assertEqual(blocks[2].confidence, 0.25)
+
+    def test_plain_response_is_retained_below_acceptance_gate(self):
+        blocks = parse_ocr_response("Q1. V = IR", (100, 100))
+        self.assertEqual(blocks[0].text, "Q1. V = IR")
+        self.assertEqual(blocks[0].confidence, 0.55)
+
+    def test_ollama_adapter_is_injectable_and_lazy(self):
+        calls = []
+
+        def generate(image, prompt):
+            calls.append((image.size, prompt))
+            return {"blocks": [{"type": "answer", "text": "TCP uses ACKs",
+                                "bbox": [1, 2, 90, 20], "confidence": 0.91}]}
+
+        adapter = OllamaOcrAdapter(generator=generate)
+        blocks = adapter.run(Image.new("RGB", (100, 100), "white"))
+        self.assertEqual(blocks[0].text, "TCP uses ACKs")
+        self.assertEqual(blocks[0].confidence, 0.91)
+        self.assertEqual(calls[0][0], (100, 100))
+        self.assertIn("Return JSON only", calls[0][1])
+
+    def test_huggingface_adapter_sends_image_content(self):
+        class _Message:
+            content = '{"blocks":[{"text":"printed answer","confidence":0.9}]}'
+
+        class _Choice:
+            message = _Message()
+
+        class _Response:
+            choices = [_Choice()]
+            model = "test/model"
+            usage = None
+
+        class _Client:
+            def __init__(self):
+                self.messages = None
+
+            def chat_completion(self, **kwargs):
+                self.messages = kwargs["messages"]
+                return _Response()
+
+        client = _Client()
+        adapter = HuggingFaceOcrAdapter(token="test-token", client=client)
+        blocks = adapter.run(Image.new("RGB", (80, 60), "white"))
+        self.assertEqual(blocks[0].text, "printed answer")
+        content = client.messages[0]["content"]
+        self.assertEqual(content[0]["type"], "text")
+        self.assertEqual(content[1]["type"], "image_url")
+        self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_remote_chain_has_unique_ids_and_keeps_local_last(self):
+        chain = default_adapters("auto", remote=True)
+        ids = [adapter.adapter_id for adapter in chain]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(ids[-1], "local_structural")
 
 
 class ConfidenceTests(unittest.TestCase):

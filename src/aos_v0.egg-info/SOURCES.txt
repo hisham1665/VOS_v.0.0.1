@@ -37,9 +37,11 @@ src/aos_v0/core/failure_manager.py
 src/aos_v0/core/graph_utils.py
 src/aos_v0/core/memory_admission.py
 src/aos_v0/core/memory_retrieval.py
+src/aos_v0/core/memory_summary.py
 src/aos_v0/core/models.py
 src/aos_v0/core/performance.py
 src/aos_v0/core/runtime.py
+src/aos_v0/core/scheduler.py
 src/aos_v0/core/shared_memory.py
 src/aos_v0/exam/__init__.py
 src/aos_v0/exam/__main__.py

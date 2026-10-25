@@ -244,6 +244,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         default=OcrStrategy.AUTO.value)
     parser.add_argument("--no-local", action="store_true",
                         help="omit the local structural engine from the chain")
+    parser.add_argument("--offline", action="store_true",
+                        help="do not call configured Hugging Face/Ollama OCR models")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
@@ -253,7 +255,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    adapters = default_adapters(args.strategy, local=not args.no_local)
+    adapters = default_adapters(
+        args.strategy,
+        local=not args.no_local,
+        remote=not args.offline,
+    )
     result = run_document(
         intake_result.pages, strategy=args.strategy, adapters=adapters
     )

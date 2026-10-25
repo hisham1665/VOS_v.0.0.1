@@ -86,11 +86,12 @@ class OcrError(RuntimeError):
 
 
 class OcrUnavailableError(OcrError):
-    """The adapter's model transport is not wired (declared-only, gap G3).
+    """The adapter's model transport is unavailable or not configured.
 
-    Raised by the declared adapters for the Phase-1 selected models (PP-OCRv6,
-    TrOCR, Qwen2.5-VL, LayoutLMv3) until a real execution transport exists,
-    mirroring the declared-only exam resources in `exam/resources.py`.
+    Declared-only adapters use this for their intentional transport gap; remote
+    adapters use it for missing credentials, unavailable model servers, or
+    provider outages. The pipeline records the reason and continues down the
+    fallback chain.
     """
 
 

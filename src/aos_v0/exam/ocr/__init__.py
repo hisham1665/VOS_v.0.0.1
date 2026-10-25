@@ -4,20 +4,22 @@ Exposes the OCR service surface:
 
   * structured output schema (`models`),
   * confidence extraction (`confidence`),
-  * OCR model adapters -- declared ML adapters plus the runnable local
-    structural engine (`adapters`),
+   * OCR model adapters -- configured Ollama/Hugging Face adapters, declared
+     ML slots, and the runnable local structural engine (`adapters`),
   * layout analysis (`layout`),
   * the orchestrating OCR service (`pipeline.run_ocr` / `run_document`).
 
-Model transports are declared-only (integration-spec gap G3), mirroring
-`exam/resources.py`; the runnable local structural adapter keeps the whole
-Phase-4 ladder executable and testable without any ML dependency.
+Remote model transports are lazy and optional; when they are unavailable the
+runnable local structural adapter keeps the whole Phase-4 ladder executable and
+the confidence gate routes the page to human review.
 """
 
 from aos_v0.exam.ocr.adapters import (
     DeclaredModelAdapter,
+    HuggingFaceOcrAdapter,
     LocalStructuralAdapter,
     OcrAdapter,
+    OllamaOcrAdapter,
     PaddleOcrAdapter,
     QwenVlOcrAdapter,
     TrocrHandwrittenAdapter,
@@ -61,6 +63,7 @@ from aos_v0.exam.ocr.pipeline import run_document, run_ocr
 __all__ = [
     "DeclaredLayoutAdapter",
     "DeclaredModelAdapter",
+    "HuggingFaceOcrAdapter",
     "LayoutAdapter",
     "LayoutRegion",
     "LocalStructuralAdapter",
@@ -79,6 +82,7 @@ __all__ = [
     "OcrStatus",
     "OcrStrategy",
     "OcrUnavailableError",
+    "OllamaOcrAdapter",
     "PaddleOcrAdapter",
     "QwenVlOcrAdapter",
     "RegionType",

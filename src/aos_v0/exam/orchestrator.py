@@ -79,6 +79,7 @@ from aos_v0.exam.models import (
     _node_id,
 )
 from aos_v0.exam.ocr.models import OcrDocument, OcrResult, OcrStatus
+from aos_v0.exam.ocr.adapters import default_adapters
 from aos_v0.exam.ocr.pipeline import run_document
 from aos_v0.exam.recovery import (
     RESOURCE_OUTAGE,
@@ -404,7 +405,15 @@ class LocalExamRunner:
             intake_result = ingest(self.source)
         except (IntakeError, OSError) as exc:  # noqa: BLE001
             raise ExamOrchestrationError(f"intake failed: {exc}") from exc
-        self.ocr_result = run_document(intake_result.pages, strategy="auto")
+        # The application path opts into lazy remote OCR providers. Direct
+        # library calls remain offline by default; unavailable Ollama/HF
+        # transports are recorded in the OCR fallback trace and eventually
+        # route the page to review rather than fabricating text.
+        self.ocr_result = run_document(
+            intake_result.pages,
+            strategy="auto",
+            adapters=default_adapters("auto", remote=True),
+        )
 
     def dispatch_eval(self, node_id: str, agent: str) -> AgentEvaluation:
         question, agent_name = self.eval_node_map[node_id]
