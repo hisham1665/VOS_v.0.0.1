@@ -4,6 +4,12 @@
 **Document type:** Research & Architecture Specification (v1.0)
 **Date:** July 2026
 
+> **Historical design reference.** This specification describes the proposed
+> research architecture, including distributed components and future modules.
+> It is not a description of the current single-process v1.0.0 runtime. See
+> [`CURRENT_STATUS.md`](CURRENT_STATUS.md) and [`SYSTEM_CONTEXT.md`](SYSTEM_CONTEXT.md)
+> for the implemented system.
+
 ---
 
 ## 1. Abstract

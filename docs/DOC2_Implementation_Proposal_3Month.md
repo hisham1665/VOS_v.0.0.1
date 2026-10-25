@@ -4,6 +4,12 @@
 **Document type:** Engineering Roadmap (v1.0)
 **Delivery model:** Strict incremental — Baseline → Integration → Advanced Novelty. Each month ends in a runnable, measured system.
 
+> **Historical roadmap.** This document records the original three-month
+> proposal. Several proposed infrastructure items (Ray, NATS, Redis,
+> PostgreSQL, Qdrant, OpenTelemetry, and the distributed agent hierarchy) are
+> not part of the current v1.0.0 repository. Use [`CURRENT_STATUS.md`](CURRENT_STATUS.md)
+> for the implemented scope and do not treat this roadmap as a release checklist.
+
 ---
 
 ## 0. Ground Rules

@@ -3,7 +3,7 @@
 The existing execution path remains the system of record:
 
 ```text
-cli.run
+prompt.process.run
   -> ManagerAgent.create_plan
   -> DNAExtractor.extract_graph
   -> ConstraintPolicy + admission control
@@ -15,13 +15,13 @@ cli.run
 The interactive layer is an adapter around that path:
 
 ```text
-Textual TUI -> CommandRegistry -> InteractiveService -> RequestContext -> cli.run
+Textual TUI -> CommandRegistry -> InteractiveService -> RequestContext -> prompt.process.run
                      |                   |                  |
                      |                   |                  +-> Artifact references
                      |                   +-> ArtifactManager
                      +-> presentation only
 
-cli.run / executor / recovery -> EventBus -> TUI + Session telemetry
+prompt.process.run / executor / recovery -> EventBus -> TUI + Session telemetry
 ```
 
 `ArtifactManager` owns validation, MIME/category detection, durable session
@@ -34,6 +34,7 @@ Events are emitted only at observed lifecycle boundaries. Candidate routing
 scores are forwarded from `CapabilityRegistry.select`; no score is synthesized
 by the UI. Recovery events originate in `FailureManager`.
 
-The current registered resources directly consume image and audio media. Other
-artifact categories are retained in request/graph context, ready for future
-registered parsers, rather than being coerced to text or silently processed.
+The current registered resources directly consume image, audio, and
+document/PDF inputs. Video, datasets, archives, and unknown artifact categories
+are retained in request/graph context, ready for future registered parsers,
+rather than being coerced to text or silently processed.

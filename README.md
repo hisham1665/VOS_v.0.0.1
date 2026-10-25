@@ -11,7 +11,7 @@ AOS is designed as a minimal, composable, deterministic, and auditable microkern
 - [Project Structure](#project-structure)
 - [Task Graph Model](#task-graph-model)
 - [Capability DNA](#capability-dna)
-- [Two-Stage Capability Binding](#two-stage-capability-binding)
+- [Capability Binding](#capability-binding)
 - [Components](#components)
   - [Models (models.py)](#models-modelspy)
   - [Manager Agent (agents/manager_agent.py)](#manager-agent-agentsmanager_agentpy)
@@ -67,11 +67,11 @@ AOS separates planning, requirement extraction, resource selection, and executio
                     ┌─────────────────────┐
                     │ Capability Registry │
                     │                     │
-                    │ Feasibility Filter  │
-                    │         ↓           │
-                    │ Pareto Scoring      │
-                    │         ↓           │
-                    │ Resource Binding    │
+                     │ Admission Gates     │
+                     │         ↓           │
+                     │ DNA Scoring         │
+                     │         ↓           │
+                     │ Resource Binding    │
                     └──────────┬──────────┘
                                │
                                ▼
@@ -102,13 +102,13 @@ AOS separates planning, requirement extraction, resource selection, and executio
                          Final Output
 ```
 
-The key architectural principle in v0.1.0 is:
+The key architectural principle in v1.0.0 is:
 
 > The Manager decides what needs to be done; the DNA Extractor describes what resources are required; the Capability Registry decides how it should be performed.
 
 ## Pipeline Flow
 
-1. **User input** — A text prompt and optionally an `--image` path are supplied.
+1. **User input** — A text prompt and optional `--input`, `--image`, or `--audio` paths are supplied.
 
 2. **Task decomposition** — The Manager Agent sends the prompt to the configured LLM and produces a Graph consisting of task nodes and dependency edges.
 
@@ -132,23 +132,24 @@ The key architectural principle in v0.1.0 is:
 
 6. **Capability DNA extraction** — After planning, the DNA Extractor independently converts each subtask into a typed capability requirement vector.
 
-7. **Resource feasibility filtering** — The Capability Registry removes resources that cannot satisfy the node's required capability flags or constraints.
+7. **Resource admission** — The Capability Registry removes resources that are unavailable, unroutable, modality-incompatible, outside the node's risk/cost/latency limits, or below its effective quality floor.
 
-8. **Resource scoring** — Feasible resources are ranked using the Pareto scoring function:
+8. **Resource scoring** — Remaining resources are ranked using the continuous DNA score:
 
    ```
-   score = quality_prior − λ·cost − μ·latency
+   score = acceptance_rate * pessimising_factor
+           − rejection_rate * optimising_factor
    ```
 
-   Cost and latency are normalized against the requirements of the individual subtask.
+   Each dimension records its own acceptance/rejection contribution; cost and latency are normalized against the individual subtask.
 
-9. **Capability binding** — The highest-scoring feasible resource is selected for the node. The runner-up margin and rejected-resource reasons are recorded for auditability.
+9. **Capability binding** — The highest-scoring surviving resource is selected for the node. The runner-up margin and rejected-resource reasons are recorded for auditability.
 
 10. **Wave execution** — The Graph Executor topologically sorts the graph into dependency waves. Independent nodes in the same wave execute concurrently.
 
 11. **Multi-parent input merging** — Nodes with multiple dependencies receive labeled outputs from all completed parents.
 
-12. **Vision context propagation** — When a vision node is present, its identification output is injected into downstream non-vision tasks so image-derived context is not lost through intermediate processing.
+12. **Media context handling** — Image, audio, and document inputs are routed by modality. With memory enabled, downstream context is handled through bounded shared-memory retrieval; the legacy direct context blocks remain available in memory-off execution.
 
 13. **Integration** — The Integrator Agent collects sink-node outputs and combines them into the final response.
 
@@ -233,7 +234,7 @@ The outputs from A and B are then merged and supplied to C.
 
 ## Capability DNA
 
-AOS v0.1.0 separates task planning from resource selection.
+AOS v1.0.0 separates task planning from resource selection.
 
 The Manager Agent is responsible for determining what work is required. It does not need to decide which concrete resource should perform that work.
 
@@ -251,10 +252,11 @@ Capability DNA
 Discrete capability requirements describing what a resource must be able to do.
 
 Examples include:
-- `web_access`
-- `summarization`
-- `vision`
-- `structured_output`
+- `web.search`
+- `text.summarization`
+- `vision.understanding`
+- `answer.synthesis`
+- `document.extraction`
 
 A resource must provide every required flag to pass the feasibility stage.
 
@@ -274,7 +276,7 @@ These values allow the registry to distinguish between resources with different 
 
 Constraints describe the operational requirements for the task.
 
-The v0.1.0 model includes:
+The v1.0.0 model includes:
 - Cost ceiling
 - Latency SLO
 - Minimum quality
@@ -305,59 +307,38 @@ Cheap model
 
 This keeps routine requirement extraction inexpensive while allowing difficult or ambiguous tasks to receive stronger reasoning.
 
-## Two-Stage Capability Binding
+## Capability Binding
 
-AOS v0.1.0 uses a two-stage resource-selection process.
+AOS v1.0.0 uses hard admission gates followed by a continuous Capability DNA
+score. The old two-stage Pareto description from the research documents is
+historical and no longer describes `CapabilityRegistry.select()`.
 
-### Stage 1 — Feasibility Filtering
+Before scoring, the registry excludes resources that are:
 
-The Capability Registry first eliminates resources that cannot satisfy the DNA.
+- declared-only or unavailable;
+- incompatible with the node's required input modality;
+- above the node's risk, cost, or latency limits;
+- below the effective quality floor; or
+- in a recent provider-failure cooldown.
 
-A candidate must:
-- Provide every required capability flag.
-- Meet the cost ceiling.
-- Meet the latency SLO.
-- Meet the minimum quality requirement.
-- Respect the required risk tolerance.
+Remaining resources are scored across required flags, reasoning, planning, tool
+complexity, cost, latency, and quality. The current score is:
 
-Conceptually:
 ```
-All Registered Resources
-          │
-          ▼
-   Capability Flags
-          │
-          ▼
-   Constraint Checks
-          │
-          ▼
- Feasible Resources
+score = acceptance_rate * pessimising_factor
+        − rejection_rate * optimising_factor
 ```
 
-This prevents unsuitable resources from winning simply because they have a high score in another dimension.
-
-### Stage 2 — Pareto Scoring
-
-Only feasible resources are scored.
-
-The current scoring model is:
-```
-score = quality_prior − λ·cost − μ·latency
-```
-where:
-- `quality_prior` represents the expected quality of the resource.
-- `cost` represents normalized resource cost.
-- `latency` represents normalized latency.
-- `λ` controls the cost penalty.
-- `μ` controls the latency penalty.
-
-Cost and latency are normalized relative to the requirements of the current subtask rather than using a single global scale.
-
-The highest-scoring feasible resource becomes the selected resource.
+Each dimension contributes an auditable acceptance or rejection value. The
+highest score wins, with a deterministic `resource_id` tie-break. The complete
+ranking, runner-up margin, and rejected-resource reasons remain available for
+traces and routing summaries. If no resource survives the gates, `SubAgent`
+uses a capability-overlap fallback and marks the node degraded rather than
+silently presenting a partial match as a normal success.
 
 ## Components
 
-### Models (models.py)
+### Models (core/models.py)
 
 Pydantic models provide the type system for task graphs and their execution state.
 
@@ -383,7 +364,7 @@ Its responsibilities include:
 - **Plan artifact generation** – Writes `data/outputs/plan.md`. Produces node tables, wave breakdowns, and deterministic Mermaid diagrams.
 - **Separation of concerns** – The Manager describes the work. It does not choose the concrete resource that performs each task.
 
-### DNA Extractor
+### DNA Extractor (core/dna_extractor.py)
 
 The DNA Extractor runs after task decomposition.
 
@@ -407,7 +388,7 @@ The extractor uses a cheap model by default and escalates to a stronger model wh
 
 This allows planning and resource selection to remain independent.
 
-### Capability Registry
+### Capability Registry (core/capability_registry.py)
 
 The Capability Registry maintains the available resources and performs runtime binding.
 
@@ -480,10 +461,19 @@ This allows independent branches of a graph to contribute to the final answer.
 
 Capabilities are standalone functions responsible for concrete operations.
 
-The baseline capabilities include:
+The default executable resources include:
 - `web_search`
 - `summarization`
+- `quick_summarization`
+- `synthesis`
 - `vision`
+- `speech_transcription`
+- `document_extraction`
+
+Operator-defined capabilities can be added through `aos.yaml`. The optional
+Hugging Face catalog contributes additional manifests when `HF_TOKEN` (or
+legacy `HUG`) is valid; declared-only interfaces are kept out of execution by
+the registry rather than being presented as working adapters.
 
 The architecture is intentionally extensible. New capabilities can be registered without changing the fundamental graph execution model.
 
@@ -643,7 +633,7 @@ This prevents the LLM from inventing, omitting, or misrepresenting graph structu
 
 ## Auditability and Logging
 
-AOS v0.1.0 expands auditability beyond graph execution.
+AOS v1.0.0 expands auditability beyond graph execution.
 
 For capability binding, the system records:
 - Selected resource
@@ -651,7 +641,7 @@ For capability binding, the system records:
 - Runner-up resource
 - Runner-up score
 - Winner/runner-up margin
-- Resources rejected during feasibility filtering
+- Resources rejected during admission gates
 - Reason each resource was rejected
 - Relevant DNA requirements
 - Binding decisions
@@ -670,7 +660,7 @@ DNA:
   min_quality = ...
   risk        = ...
 
-Feasibility:
+Admission gates:
   Resource A → ACCEPT
   Resource B → REJECT: latency SLO violated
   Resource C → REJECT: missing required flag
@@ -760,29 +750,28 @@ that kernel; it never makes routing decisions.
 Commands: `/help`, `/clear`, `/history`, `/session`, `/status`, `/agents`,
 `/capabilities`, `/files`, `/upload`, `/config`, and `/quit`.
 
-Current kernel support for direct media execution remains image and audio,
-matching the registered capabilities. Documents, datasets, archives and video
-are accepted and retained as standardized context, but require a corresponding
-registered parsing capability before AOS can process their binary contents.
+Current kernel support for direct media execution includes images, audio, and
+PDF/text-like documents. Documents are extracted locally with source/page
+markers; images and audio are sent to their configured provider profiles.
+Datasets, archives, video, and other retained artifact categories require a
+corresponding registered parsing capability before AOS can process their binary
+contents.
 
 ## Configuration
 
-The v0.1.0 architecture introduces configuration points for capability selection in addition to the existing execution settings.
+The v1.0.0 architecture uses validated YAML configuration for runtime, memory,
+model profiles, and operator-defined capabilities. See
+[`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) for the supported schema.
 
 Important configuration concepts include:
 
 | Setting                    | Purpose                                      |
 |----------------------------|----------------------------------------------|
-| DNA extraction model       | Model used for requirement extraction        |
-| DNA escalation threshold   | Confidence threshold for strong-model escalation |
-| Cost ceiling               | Maximum acceptable resource cost             |
-| Latency SLO                | Maximum acceptable latency                   |
-| Minimum quality            | Minimum resource quality requirement         |
-| Risk tolerance             | Maximum acceptable operational risk          |
-| λ                          | Cost penalty in resource scoring             |
-| μ                          | Latency penalty in resource scoring          |
-
-The exact configuration mechanism depends on the project environment.
+| `runtime.*`                | Worker, timeout, budget, graph, context and output limits |
+| `memory.*`                 | Shared-memory enablement, bounds, relevance and logging |
+| `models.*`                 | Provider, model, endpoint and output settings |
+| `capabilities.*`           | Operator-defined chat or Python capability manifests |
+| `.env` / `AOS_CONFIG`      | Credentials and alternate YAML profile selection |
 
 ## Design Decisions
 
@@ -793,8 +782,10 @@ The exact configuration mechanism depends on the project environment.
 
 This separation prevents task planning from becoming tightly coupled to a particular model or tool.
 
-### Feasibility before optimization
-A resource should not win merely because it scores well if it violates a hard requirement.
+### Admission before scoring
+A resource should not win merely because it scores well if it violates a hard
+requirement. The registry applies availability, routability, modality, risk,
+cost, latency, quality, and provider-cooldown gates before DNA scoring.
 
 Therefore:
 ```
@@ -819,12 +810,12 @@ Capability binding decisions are recorded so that resource selection can be insp
 
 ## Upgrade Path
 
-AOS v0.1.0 establishes the foundation for increasingly sophisticated resource-aware execution.
+AOS v1.0.0 establishes the foundation for increasingly sophisticated resource-aware execution.
 
 Potential future extensions include:
 - Additional capability types.
 - Richer Capability DNA schemas.
-- More advanced multi-objective/Pareto selection.
+- Learned or richer multi-objective resource selection.
 - Resource health and availability tracking.
 - Dynamic resource registration.
 - Historical performance priors.
@@ -846,10 +837,10 @@ Task Graph
 Capability DNA
   │
   ▼
-Feasibility Filtering
+Admission Gates
   │
   ▼
-Pareto Resource Selection
+Continuous DNA Resource Scoring
   │
   ▼
 Concurrent DAG Execution
@@ -858,7 +849,9 @@ Concurrent DAG Execution
 Integrated Result
 ```
 
-AOS v0.1.0 therefore moves the system from a capability-routed task executor toward a resource-aware adaptive cognitive microkernel, while retaining the original principles of composability, determinism, concurrency, and auditability.
+AOS v1.0.0 moves the system from a capability-routed task executor toward a
+resource-aware adaptive cognitive microkernel, while retaining composability,
+determinism, concurrency, and auditability.
 
 ## v1.0.0 operator quick start
 
@@ -880,73 +873,8 @@ content-hashed artifacts, and performance-aware resource routing. See
 [`docs/ADAPTABILITY.md`](docs/ADAPTABILITY.md) for the domain-independent
 capability contract and the medical-AOS improvements applied to the core.
 
-## How AOS v0.0.3 plans and executes tasks
+## Current implementation reference
 
-AOS decomposes a user job into a **task graph** — a directed acyclic graph
-(DAG) of **nodes** connected by **edges**.
-
-- **Node:** a single unit of work. Each node has a unique `id`, a `description`
-  (which doubles as the instruction passed to its capability), a `capability`
-  (the coarse tool hint, e.g. `web_search`, `summarization`, or `vision`), a
-  **Capability DNA** vector, and a `depends_on` list of node ids it must wait
-  for.
-- **Edge:** a dependency from one node to another. If node C has
-  `depends_on: ["a", "b"]`, it runs only after both A and B finish, and
-  receives their outputs as input.
-
-**Capability DNA (DOC1 §5.2):** planning and resource selection are separate
-passes. The Manager Agent only decomposes; a dedicated **DNA Extractor** then
-maps each subtask to a typed requirement vector with three segments —
-discrete capability `flags`, `ordinals` scoring difficulty 0–4, and
-`constraints` (cost ceiling, latency SLO, min quality, risk tolerance). The
-extractor runs a cheap model first and escalates to a strong one only when its
-self-reported confidence falls below threshold.
-
-**Two-stage binding (DOC1 M5):** for each node the Capability Registry first
-applies a **feasibility filter** — a resource must provide every flag in the
-DNA and satisfy all four constraints — then scores the survivors with a Pareto
-scorer, `score = quality_prior − λ·cost − μ·latency`, with cost and latency
-normalised against that subtask's own ceiling and SLO. The winner, the
-runner-up margin, and the reason each rejected resource was filtered are all
-logged.
-
-**Concurrency:** nodes in the same dependency "wave" are independent and run
-concurrently via threads. For example, in the graph below, nodes `a` and `b`
-run in parallel, then `c` and `d` run in parallel, and finally `e` runs.
-
-**Multi-parent merging:** a node with multiple parents receives the labeled,
-concatenated outputs of all its parents, so it can compare, combine, or
-reconcile them.
-
-**Diagrams:** the Mermaid diagrams in `data/outputs/plan.md` are generated
-deterministically from the validated graph by `diagram_utils.build_mermaid()`,
-not by the LLM. This is a deliberate reliability choice — the diagram always
-faithfully represents the actual graph structure, wave assignments, and
-capability types, with no risk of the LLM inventing or omitting nodes.
-
-```mermaid
-flowchart TD
-    subgraph Wave 0
-        a["Research solar energy (web_search)"]
-        b["Research wind energy (web_search)"]
-    end
-    subgraph Wave 1
-        c["Summarize solar (summarization)"]
-        d["Summarize wind (summarization)"]
-    end
-    subgraph Wave 2
-        e["Compare summaries (summarization)"]
-    end
-    a --> c
-    b --> d
-    c --> e
-    d --> e
-
-    classDef web_searchStyle fill:#4CAF50,color:#fff
-    classDef summarizationStyle fill:#2196F3,color:#fff
-    class a web_searchStyle
-    class b web_searchStyle
-    class c summarizationStyle
-    class d summarizationStyle
-    class e summarizationStyle
-```
+For the versioned runtime status, supported resource pools, shared-memory
+boundary, configuration source of truth, generated artifacts, and verification
+commands, see [`docs/CURRENT_STATUS.md`](docs/CURRENT_STATUS.md).

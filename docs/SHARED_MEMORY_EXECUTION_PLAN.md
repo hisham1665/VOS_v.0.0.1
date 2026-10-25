@@ -2,6 +2,13 @@
 
 Companion to `docs/SHARED_MEMORY_PLAN.md`. That document is the *what and why*. This one is the *who, in what order, with which prompt*.
 
+> **Historical execution record.** This file preserves the original phased
+> implementation prompts from the shared-memory work. It is not a current
+> branch/agent instruction set. The released implementation and its actual
+> boundaries are summarized in [`CURRENT_STATUS.md`](CURRENT_STATUS.md) and
+> [`SYSTEM_CONTEXT.md`](SYSTEM_CONTEXT.md); acceptance targets below have not
+> been independently re-certified merely because the corresponding code exists.
+
 Every phase below is a self-contained unit of work for one coding agent. Phases are strictly ordered except where marked parallel-safe. Each phase ends with a green test suite; no phase is "done" because the code exists.
 
 ---

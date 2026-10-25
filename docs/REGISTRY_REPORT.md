@@ -1,13 +1,14 @@
 # Registry Report — Expanded Model Catalog
 
-Generated from the live catalog in `providers/hf.py::HF_MODEL_CATALOG`
+Generated from the live catalog in `src/aos_v0/providers/hf.py::HF_MODEL_CATALOG`
 (sources fetched 2026-08-16). Machine-readable mirror:
-`outputs/registry_data.json` (regenerate with `python registry_export.py`).
+`data/outputs/registry_data.json` (regenerate with
+`python -m aos_v0.services.registry_export`).
 
 ## Scope
 
 The default pool (`build_default_registry()`) is untouched — the DOC2 control
-group stays frozen. The HF pool is **opt-in** and registers **17 real models**
+group stays frozen. The HF pool is **opt-in** and registers **17 catalog models**
 across **15 capability classes** as ordinary `CapabilityManifest` resources.
 Nothing in the core (`models.py` scheduling, agents, executor) references a
 model or provider by name; routing happens on capability flags alone.
@@ -21,10 +22,11 @@ Two additive schema extensions were required to express the catalog honestly:
 
 ## Models
 
-`providers/hf.py` — 8 chat-completion models wired to the HF adapter + 9
-declared-only interfaces (embedding, reranking, 2 ASR, audio understanding,
-audio classification, image classification, object detection, image feature
-extraction). Every capability flag carries a provenance marker: **documented** =
+`src/aos_v0/providers/hf.py` — 8 chat-completion models, 2 ASR models, one
+audio-chat model, and one audio-classification model are wired to the adapter;
+5 catalog entries remain declared-only (embedding, reranking, image
+classification, object detection, and image feature extraction). Every
+capability flag carries a provenance marker: **documented** =
 asserted on the model card, **inferred** = implied by documented properties
 (rationale below).
 
@@ -115,28 +117,27 @@ published (billed per compute time)".
 
 | Interface | resource_id | transport | run_fn |
 |---|---|---|---|
-| chat_completion | 8 chat models (qwen3-30b, qwen3-8b, vlm, coder, deepseek, llama3.3, llama3.2, gemma2) | `wired` | calls the HF adapter with the pinned model |
+| chat_completion | 8 chat models (Qwen, Qwen-VL, Coder, DeepSeek, Llama, Gemma) | `wired` | calls the HF adapter with the pinned model |
+| automatic_speech_recognition | `hf_whisper_large_v3_turbo`, `hf_whisper_large_v3` | `wired` | calls the HF ASR adapter |
+| audio_chat_completion | `hf_qwen2_audio_7b_instruct` | `wired` | calls the HF audio-chat adapter |
+| audio_classification | `hf_ast_audioset_finetuned` | `wired` | calls the HF audio-classification adapter |
 | feature_extraction | `hf_bge_large_en_v1_5` | `declared` | raises `ProviderError` naming the interface |
 | rerank | `hf_bge_reranker_v2_m3` | `declared` | raises `ProviderError` naming the interface |
-| automatic_speech_recognition | `hf_whisper_large_v3_turbo`, `hf_whisper_large_v3` | `declared` | raises `ProviderError` naming the interface |
-| audio_chat_completion | `hf_qwen2_audio_7b_instruct` | `declared` | raises `ProviderError` naming the interface |
-| audio_classification | `hf_ast_audioset_finetuned` | `declared` | raises `ProviderError` naming the interface |
 | zero_shot_image_classification | `hf_siglip2_base_224` | `declared` | raises `ProviderError` naming the interface |
 | object_detection | `hf_yolo11` | `declared` | raises `ProviderError` naming the interface |
 | image_feature_extraction | `hf_dinov3_vitb16` | `declared` | raises `ProviderError` naming the interface |
 
-The declared-not-wired pattern is deliberate: `huggingface_hub==0.35.0`'s
-`InferenceClient` exposes `feature_extraction`, `rerank`-adjacent
-text-classification and ASR endpoints, but the adapter's text transport is chat;
-registering the interface now with an explicit error keeps the capability
-queryable while never faking execution (mirrors the VLM's image-input note).
+The declared-not-wired pattern is deliberate: interfaces that are not wired to
+the adapter are still queryable as manifests but fail explicitly with a typed
+`ProviderError` if invoked. Wired audio interfaces use dedicated adapter calls;
+they are not routed through the text-only chat path.
 
 ## Querying
 
 ```python
-from capability_registry import CapabilityRegistry
-from models import CapabilityDNA, DNAConstraints
-import providers.hf as hf_mod
+  from aos_v0.core.capability_registry import CapabilityRegistry
+  from aos_v0.core.models import CapabilityDNA, DNAConstraints
+  import aos_v0.providers.hf as hf_mod
 
 reg = CapabilityRegistry()
 hf_mod.register_hf_resources(reg)
@@ -192,10 +193,11 @@ and the two 3.3B-active MoE models).
 
 ## Deliverables
 
-- Catalog + registration: `providers/hf.py` (`HFModelSpec`, `HF_MODEL_CATALOG`,
+- Catalog + registration: `src/aos_v0/providers/hf.py` (`HFModelSpec`, `HF_MODEL_CATALOG`,
   `build_hf_manifests`, `register_hf_resources`, `_validate_spec`)
-- Schema extensions: `models.py`, `capability_registry.py` (audio, image resource classes; 33 new capability flags)
-- Tests: `test_hf_provider.py`, `test_model_catalog.py` (run with
-  `python test_hf_provider.py` / `python test_model_catalog.py`)
-- Machine-readable registry data: `outputs/registry_data.json`
-  (generated by `registry_export.py`)
+- Schema extensions: `src/aos_v0/core/models.py`,
+  `src/aos_v0/core/capability_registry.py` (audio/image resource classes and
+  expanded capability flags)
+- Tests: repository tests under `tests/`; run with `python -m pytest tests/ -q`
+- Machine-readable registry data: `data/outputs/registry_data.json`
+  (generated by `python -m aos_v0.services.registry_export`)

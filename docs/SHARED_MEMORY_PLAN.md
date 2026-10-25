@@ -1,7 +1,9 @@
 # AOS Shared Memory — Architecture Plan
 
-**Status:** proposal, not yet implemented
-**Target version:** v0.0.6
+**Status:** design record; the bounded request/session implementation is present
+in `v1.0.0`, while learned admission, semantic subgraph transplantation, and
+benchmark evaluation remain future work.
+**Target version:** v1.0.0
 **Source inspiration:** *Learning to Share: Selective Memory for Efficient Parallel Agentic Systems* (arXiv 2602.05965v1, Fioresi et al., UCF)
 **Decisions locked:** request + session scope; heuristic admission controller with decision logging for later RL; no extra LLM calls in v1.
 
@@ -39,7 +41,11 @@ Their own stated limitations, which are our opportunities: memory is per-task on
 
 ## 2. Why AOS cannot copy it literally
 
-AOS v0.0.5 is not a K-parallel-team system. `GraphExecutor.run()` builds waves via `build_waves(graph)` and runs the nodes *within one wave* concurrently (`src/aos_v0/agents/graph_executor.py`). There is one DAG, one orchestrator (`ManagerAgent`), one terminal synthesis node. There is no "team 2" to share with.
+AOS v1.0.0 is not a K-parallel-team system. `GraphExecutor.run()` dispatches
+dependency-ready nodes within one DAG concurrently (`src/aos_v0/agents/graph_executor.py`).
+There is one orchestrator (`ManagerAgent`) and one terminal synthesis node; the
+shared-memory service addresses redundancy across nodes, retries, and
+interactive session requests rather than between separate teams.
 
 So "cross-team redundancy" does not exist here. What does exist:
 
@@ -49,7 +55,7 @@ So "cross-team redundancy" does not exist here. What does exist:
 | **R2** | The substitution ladder re-runs a failed node on the next resource **with no memory of the first attempt**. A partial answer from attempt 1 is thrown away. | `failure_manager.py:259 execute()` |
 | **R3** | Downstream nodes re-derive facts that are already sitting in a parent's raw output, because that output arrives as an undifferentiated blob with no index. | `graph_executor.py` `_run_node` input assembly |
 | **R4** | In `InteractiveService`, every `submit()` re-plans and re-executes from zero. A follow-up question about the same uploaded PDF re-extracts the same PDF. | `interactive.py:submit()` |
-| **R5** | **Unbounded context injection.** Today the executor concatenates *every* parent's full output, then unconditionally prepends *every* vision artifact, *every* audio transcription, and *every* extracted document to *every* non-matching node's input. No byte cap anywhere. On a 3-wave graph with a 40-page PDF this multiplies the same text across every node's prompt. | `graph_executor.py` lines ~104-190 |
+| **R5** | **Unbounded context injection in the memory-off path.** The legacy executor concatenates *every* parent's full output, then unconditionally prepends *every* vision artifact, *every* audio transcription, and *every* extracted document to *every* non-matching node's input. The memory-enabled path uses bounded retrieval, while full budgeting of every legacy block remains a refinement. | `graph_executor.py` |
 
 R5 is the single largest cost item and the cheapest to fix, and it is *exactly* the problem the paper's key-only exposure solves. R1-R4 are step-level redundancy — the paper's actual target — reframed for a DAG.
 
@@ -221,7 +227,16 @@ Everything a node does not need costs it one line instead of 138k characters.
 
 ### 5.1 Context budget replaces unbounded injection
 
-`ContextBudget(total_chars=12_000, per_entry_chars=4_000)` governs the whole of `node.input`. The current unconditional blocks in `graph_executor.py` (vision context, audio context, document context, parent outputs) are all routed through it. A parent output that exceeds `per_entry_chars` is **admitted to the bank in full** and injected as summary + head slice + a pointer. Nothing is lost; it just stops being copied `N` times.
+The design target is for `ContextBudget(total_chars=12_000, per_entry_chars=4_000)`
+to govern the whole of `node.input`. A parent output that exceeds
+`per_entry_chars` is **admitted to the bank in full** and injected as summary +
+head slice + a pointer. Nothing is lost; it just stops being copied `N` times.
+
+**v1.0.0 implementation note:** memory-enabled execution uses the bounded
+`MemoryRetriever` path and skips the legacy media-context blocks. Memory-off
+execution preserves the older direct-injection behavior for compatibility; a
+future refinement can apply the same budget to those legacy blocks without
+changing the memory contract.
 
 ---
 
